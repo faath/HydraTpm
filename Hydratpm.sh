@@ -44,11 +44,17 @@ else
     # Tenta limpar e criar as chaves
     tpm2_clear 2>/dev/null || true
     
-    # Cria chave primária RSA/SHA256 (Padrão Principal) e salva PEM
-    if tpm2_createprimary -C e -g sha256 -G rsa -c primary.ctx >/dev/null 2>&1; then
+    # --- MELHORIA AQUI: Gera entropia aleatória ---
+    head -c 32 /dev/urandom > entropy.dat
+    
+    # Cria chave primária RSA/SHA256 usando o arquivo de entropia (-u entropy.dat)
+    if tpm2_createprimary -C e -g sha256 -G rsa -c primary.ctx -u entropy.dat >/dev/null 2>&1; then
         tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
         
-        # Tentativas extras (sem falhar o script se der erro)
+        # Remove o arquivo temporário de entropia
+        rm entropy.dat
+        
+        # Tentativas extras (mantidas do original, mas opcionais)
         tpm2_createprimary -C e -g sha1 -G rsa -c primary.ctx >/dev/null 2>&1 || true
         tpm2_createprimary -C e -g md5 -G rsa -c primary.ctx >/dev/null 2>&1 || true
         tpm2_evictcontrol -C o -c primary.ctx 0x81010001 >/dev/null 2>&1 || true
