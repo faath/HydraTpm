@@ -10,7 +10,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - V5 (NULL FORCE)"
+echo "   🛡️  HYDRA TPM TOOL - V6 (DRIVER FIX)"
 echo "==========================================="
 
 if [ -t 0 ]; then
@@ -22,69 +22,93 @@ fi
 if [[ -z "$DISCORD_NICK" ]]; then DISCORD_NICK="Anonimo"; fi
 CLEAN_NICK="$(echo "$DISCORD_NICK" | tr -cd '[:alnum:] ._-' | cut -c1-30)"
 HOSTNAME="$(hostname)"
-LIVE_USER="$(whoami)"
 IP_ADDR="$(hostname -I | awk '{print $1}')"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(date +%s | md5sum | head -c 8)"
 
-# 1. Correção de Dependências
+# 1. Correção de Repositórios e Instalação de DRIVERS
+echo "⚙️  Instalando Drivers TCTI..."
 if [ -f /etc/apt/sources.list ]; then sed -i '/cdrom/d' /etc/apt/sources.list 2>/dev/null || true; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
-apt-get install -y tpm2-tools curl -qq >/dev/null || true
+# ADICIONADO: libtss2-tcti-device0 (Fundamental para o erro 'Unable to run')
+apt-get install -y tpm2-tools libtss2-tcti-device0 curl -qq >/dev/null || true
+
+# 2. Forçar carregamento de módulos do Kernel
+echo "🔌 Ativando módulos do Kernel..."
+modprobe tpm_tis 2>/dev/null || true
+modprobe tpm_crb 2>/dev/null || true
+modprobe tpm_tis_core 2>/dev/null || true
+
+# 3. Permissões Brutas (Garante acesso)
+chmod 777 /dev/tpm* 2>/dev/null || true
+chmod 777 /dev/tpmrm* 2>/dev/null || true
 
 TPM_SUCCESS=false
 ERROR_MSG="Erro desconhecido"
 HASH_BLOCK="N/A"
 HIERARCHY_USED="N/A"
 
-# 2. Configuração TCTI (Gerenciador de Recursos)
-# Isso ajuda a evitar o erro "Unable to run" gerenciando o acesso concorrente
-if [ -e /dev/tpmrm0 ]; then
-    export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
-elif [ -e /dev/tpm0 ]; then
-    export TPM2TOOLS_TCTI="device:/dev/tpm0"
-fi
+# Função para tentar criar chave com TCTI específico
+try_create_key() {
+    local TCTI_VAL="$1"
+    local HIERARCHY="$2"
+    
+    # Define o backend de comunicação
+    export TPM2TOOLS_TCTI="$TCTI_VAL"
+    
+    # Tenta criar
+    if tpm2_createprimary -C "$HIERARCHY" -g sha256 -G rsa -c primary.ctx -u entropy.dat >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
 
 echo "🔐 Iniciando operações TPM..."
 
-if ! command -v tpm2_createprimary &> /dev/null; then
-    ERROR_MSG="Dependencias nao instaladas."
+if [ ! -e /dev/tpm0 ]; then
+    ERROR_MSG="Hardware TPM não detectado (Verifique BIOS)."
 else
-    # LIMPEZA PROFUNDA: Tenta limpar contextos órfãos que causam erro de memória
-    tpm2_flushcontext -t 2>/dev/null || true
-    tpm2_flushcontext -l 2>/dev/null || true
-    tpm2_clear 2>/dev/null || true
-    
     # Gera entropia
     dd if=/dev/urandom of=entropy.dat bs=32 count=1 2>/dev/null
 
-    # --- TENTATIVA 1: HIERARQUIA OWNER (-C o) ---
-    echo "   > Tentando Hierarquia Owner..."
-    if OUTPUT=$(tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat 2>&1); then
-        HIERARCHY_USED="Owner (Persistente)"
+    # --- ESTRATÉGIA DE TENTATIVAS MÚLTIPLAS ---
+    
+    # 1. Tenta limpar (com configuração padrão)
+    tpm2_flushcontext -t 2>/dev/null || true
+    tpm2_clear 2>/dev/null || true
+
+    # Tentativa A: Usando /dev/tpmrm0 (Resource Manager) + Hierarquia Owner
+    if try_create_key "device:/dev/tpmrm0" "o"; then
+        HIERARCHY_USED="Owner (via tpmrm0)"
         TPM_SUCCESS=true
+        
+    # Tentativa B: Usando /dev/tpm0 (Acesso Direto - Raw) + Hierarquia Owner
+    # Isso resolve se o gerenciador de recursos estiver quebrado
+    elif try_create_key "device:/dev/tpm0" "o"; then
+        HIERARCHY_USED="Owner (Direto/Raw)"
+        TPM_SUCCESS=true
+        
+    # Tentativa C: Hierarquia NULL (Fallback) via tpmrm0
+    elif try_create_key "device:/dev/tpmrm0" "n"; then
+        HIERARCHY_USED="Null (via tpmrm0)"
+        TPM_SUCCESS=true
+        
+    # Tentativa D: Hierarquia NULL (Fallback) via tpm0
+    elif try_create_key "device:/dev/tpm0" "n"; then
+        HIERARCHY_USED="Null (Direto/Raw)"
+        TPM_SUCCESS=true
+        
     else
-        # --- TENTATIVA 2: HIERARQUIA NULL (-C n) ---
-        # Se Owner falhar (bloqueio de BIOS), usamos Null.
-        # Null muda a semente a cada boot automaticamente.
-        echo "   ⚠️ Owner falhou. Tentando Hierarquia Null (Force Mode)..."
-        
-        # Limpa novamente antes de tentar
-        tpm2_flushcontext -t 2>/dev/null || true
-        
-        if OUTPUT=$(tpm2_createprimary -C n -g sha256 -G rsa -c primary.ctx -u entropy.dat 2>&1); then
-            HIERARCHY_USED="Null (Boot-Reset)"
-            TPM_SUCCESS=true
-        else
-            # Falha total - Captura o erro exato
-            ERROR_MSG="FALHA DUPLA: $(echo "$OUTPUT" | tail -n 1 | tr -d '"')"
-        fi
+        # Captura erro real executando uma vez sem silenciar e sem TCTI definido (auto-detect)
+        unset TPM2TOOLS_TCTI
+        OUTPUT=$(tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat 2>&1)
+        ERROR_MSG="FALHA TOTAL: $(echo "$OUTPUT" | tail -n 1 | tr -d '"')"
     fi
     
     rm entropy.dat 2>/dev/null
 
-    # Se funcionou qualquer um dos dois métodos:
     if [ "$TPM_SUCCESS" = true ]; then
         tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
         
@@ -93,12 +117,11 @@ else
         H_SHA256="$(sha256sum endorsement_pub.pem | awk '{print $1}')"
         
         HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
-        ERROR_MSG="Sucesso - Método: $HIERARCHY_USED"
         COLOR=5763719 # Verde
         STATUS_TITLE="✅ SUCESSO - SERIAL ALTERADO"
     else
         COLOR=15548997 # Vermelho
-        STATUS_TITLE="❌ FALHA CRÍTICA"
+        STATUS_TITLE="❌ FALHA CRÍTICA DE HARDWARE"
     fi
 fi
 
@@ -114,7 +137,7 @@ generate_post_data()
     "color": $COLOR,
     "fields": [
       { "name": "👤 Usuário", "value": "Discord: $CLEAN_NICK\nPC: $HOSTNAME", "inline": true },
-      { "name": "🌐 Rede", "value": "IP: $IP_ADDR\nID: $EXEC_ID", "inline": true },
+      { "name": "🌐 Rede", "value": "ID: $EXEC_ID", "inline": true },
       { "name": "📊 Status", "value": "$STATUS_TITLE" },
       { "name": "🛠️ Método", "value": "$HIERARCHY_USED" },
       { "name": "⚠️ Diagnóstico", "value": "$ERROR_MSG" },
