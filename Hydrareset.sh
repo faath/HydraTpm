@@ -46,9 +46,7 @@ tpm2_evictcontrol -C o -c primary.ctx 0x81010001 || echo "⚠️ EvictControl fa
 
 echo "✅ Script finalizado com sucesso"
 
-#######################################
-# ENVIO DO LOG PARA O DISCORD
-#######################################
+
 echo "📡 Enviando log para o Discord..."
 
 curl -X POST "$WEBHOOK_URL" \
