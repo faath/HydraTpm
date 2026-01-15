@@ -146,6 +146,3 @@ curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null
 
 echo "✅ Concluído. Reiniciando em 5 segundos..."
 sleep 5
-echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
-echo b > /proc/sysrq-trigger 2>/dev/null
-reboot -f
