@@ -1,112 +1,128 @@
 #!/bin/bash
 set -u
 
-# CONFIGURAÇÕES
+# ==============================================================================
+# CONFIGURAÇÃO
+# ==============================================================================
 WEBHOOK_URL="https://ptb.discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
 LOG="/tmp/tpm.log"
 
-# Redireciona tudo para o log e para a tela
 exec > >(tee -a "$LOG") 2>&1
 
+# ==============================================================================
+# 1. IDENTIFICAÇÃO
+# ==============================================================================
+# Corrige erro de repositório do Live CD
+if [ -f /etc/apt/sources.list ]; then sed -i '/cdrom/d' /etc/apt/sources.list; fi
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - LIVE MODE"
+echo "   🛡️  HYDRA TPM - SPOOF/RANDOMIZER"
 echo "==========================================="
-read -r -p "👤 Digite seu Nick do Discord: " DISCORD_NICK < /dev/tty || true
+sleep 1
 
-# Limpeza rigorosa do Nick para evitar quebra do JSON
+if [ -t 0 ]; then
+    read -r -p "👤 Nick do Discord: " DISCORD_NICK
+else
+    read -r -p "👤 Nick do Discord: " DISCORD_NICK < /dev/tty
+fi
+
 if [[ -z "$DISCORD_NICK" ]]; then DISCORD_NICK="Anonimo"; fi
 CLEAN_NICK="$(echo "$DISCORD_NICK" | tr -cd '[:alnum:] ._-' | cut -c1-30)"
 
-# Coleta de dados do sistema
 HOSTNAME="$(hostname)"
-LIVE_USER="$(whoami)"
 IP_ADDR="$(hostname -I | awk '{print $1}')"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(echo "$CLEAN_NICK-$HOSTNAME-$(date +%s)" | sha256sum | head -c 8)"
 
-
-echo "⚙️  Instalando dependências (aguarde)..."
+# ==============================================================================
+# 2. INSTALAÇÃO (ESSENCIAL: tpm2-tools + openssl)
+# ==============================================================================
+echo "⚙️  Instalando ferramentas..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null
-apt-get install -y tpm2-tools -qq >/dev/null || true
+apt-get update --allow-releaseinfo-change -y >/dev/null 2>&1 || true
+apt-get install -y tpm2-tools openssl >/dev/null 2>&1 || true
 
+# ==============================================================================
+# 3. GERAÇÃO DE CHAVE ALEATÓRIA (SPOOF)
+# ==============================================================================
 TPM_SUCCESS=false
 ERROR_MSG="Nenhum"
+HASH_BLOCK=""
+COLOR=15548997 # Vermelho
 
-echo "🔐 Iniciando operações TPM..."
+echo "🔐 Gerando NOVA identidade TPM..."
 
 if [ ! -e /dev/tpm0 ]; then
-    ERROR_MSG="Dispositivo /dev/tpm0 não encontrado."
-    COLOR=15548997 # Vermelho (RED)
+    ERROR_MSG="TPM Hardware não detectado."
+    STATUS_TEXT="❌ SEM TPM"
 else
-    # Tenta limpar e criar as chaves
+    # 1. Limpa o TPM para remover chaves antigas/bloqueadas
     tpm2_clear 2>/dev/null || true
-    
-    # Cria chave primária RSA/SHA256 (Padrão Principal) e salva PEM
-    if tpm2_createprimary -C e -g sha256 -G rsa -c primary.ctx >/dev/null 2>&1; then
+    rm -f endorsement_pub.pem primary.ctx
+
+    # 2. Gera "Unique Data" aleatório para alterar o hash final
+    # Isso é o que faz a chave ser DIFERENTE da original do hardware
+    RANDOM_SEED=$(head -c 32 /dev/urandom | xxd -p -c 32)
+
+    # 3. Cria a Primary Key com o seed aleatório (-u)
+    if tpm2_createprimary -C e -g sha256 -G rsa -u "$RANDOM_SEED" -c primary.ctx >/dev/null 2>&1; then
         tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
         
-        # Tentativas extras (sem falhar o script se der erro)
-        tpm2_createprimary -C e -g sha1 -G rsa -c primary.ctx >/dev/null 2>&1 || true
-        tpm2_createprimary -C e -g md5 -G rsa -c primary.ctx >/dev/null 2>&1 || true
+        # Opcional: Persistir essa nova chave no slot do Windows (0x81010001)
+        # Isso tenta "enganar" leituras futuras, mas pode ser sobrescrito pelo Windows.
         tpm2_evictcontrol -C o -c primary.ctx 0x81010001 >/dev/null 2>&1 || true
-        
-        TPM_SUCCESS=true
-        COLOR=5763719 # Verde (GREEN)
+
+        if [ -f endorsement_pub.pem ]; then
+            # Converte para DER (Binário) para gerar o hash correto
+            H_MD5="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | md5sum | awk '{print $1}')"
+            H_SHA1="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | sha1sum | awk '{print $1}')"
+            H_SHA256="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+            
+            HASH_BLOCK="\\n**🎲 Chave Randomizada (Spoofed):**\\n\`\`\`yaml\\nMD5:    $H_MD5\\nSHA1:   $H_SHA1\\nSHA256: $H_SHA256\\n\`\`\`"
+            TPM_SUCCESS=true
+            COLOR=5763719 # Verde
+            STATUS_TEXT="✅ SUCESSO (NOVA ID)"
+        else
+            ERROR_MSG="Erro ao exportar a nova chave."
+            STATUS_TEXT="❌ ERRO EXPORT"
+        fi
     else
-        ERROR_MSG="Falha ao criar primary key."
-        COLOR=15548997 # Vermelho
+        ERROR_MSG="Erro no comando tpm2_createprimary (Hardware bloqueado?)."
+        STATUS_TEXT="❌ ERRO TPM"
     fi
 fi
 
-
-HASH_BLOCK=""
-if [ -f endorsement_pub.pem ]; then
-    H_MD5="$(md5sum endorsement_pub.pem | awk '{print $1}')"
-    H_SHA1="$(sha1sum endorsement_pub.pem | awk '{print $1}')"
-    H_SHA256="$(sha256sum endorsement_pub.pem | awk '{print $1}')"
-    
-    HASH_BLOCK="\\n**🔐 Hashes Gerados:**\\n\`\`\`yaml\\nMD5:    $H_MD5\\nSHA1:   $H_SHA1\\nSHA256: $H_SHA256\\n\`\`\`"
-else
-    HASH_BLOCK="\\n⚠️ **Nenhum hash gerado** (Arquivo PEM ausente)"
-fi
-
-STATUS_TEXT="✅ SUCESSO"
-if [ "$TPM_SUCCESS" = false ]; then
-    STATUS_TEXT="❌ FALHA: $ERROR_MSG"
-fi
-
-
-echo "📡 Enviando relatório limpo para o Discord..."
-
+# ==============================================================================
+# 4. ENVIO PARA O DISCORD
+# ==============================================================================
+echo "📡 Enviando relatório..."
 
 JSON_PAYLOAD=$(cat <<EOF
 {
-  "username": "Hydra TPM Log",
+  "username": "Hydra TPM Spoofer",
   "embeds": [
     {
-      "title": "🛡️ Relatório de Execução TPM",
+      "title": "🛡️ Relatório TPM (Randomized)",
       "color": $COLOR,
       "fields": [
         {
           "name": "👤 Usuário",
-          "value": "**Discord:** $CLEAN_NICK\n**PC:** $HOSTNAME ($LIVE_USER)",
+          "value": "$CLEAN_NICK",
           "inline": true
         },
         {
-          "name": "🌐 Rede",
-          "value": "**IP:** $IP_ADDR\n**ID:** \`$EXEC_ID\`",
+          "name": "🌐 IP",
+          "value": "$IP_ADDR",
           "inline": true
         },
         {
-          "name": "📊 Status TPM",
+          "name": "📊 Status",
           "value": "$STATUS_TEXT"
         },
         {
-          "name": "📜 Detalhes",
-          "value": "$HASH_BLOCK"
+          "name": "📜 Novos Hashes Gerados",
+          "value": "${HASH_BLOCK:-Sem dados}"
         }
       ],
       "footer": {
@@ -118,12 +134,14 @@ JSON_PAYLOAD=$(cat <<EOF
 EOF
 )
 
-
 curl -s -H "Content-Type: application/json" -X POST -d "$JSON_PAYLOAD" "$WEBHOOK_URL" >/dev/null
-
-
 curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null
 
-
-echo "✅ Concluído. Reiniciando em 5 segundos..."
-sleep 5
+# ==============================================================================
+# 5. REBOOT NUCLEAR
+# ==============================================================================
+echo "✅ ID Alterada. Reiniciando em 3s..."
+sleep 3
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+echo b > /proc/sysrq-trigger 2>/dev/null
+reboot -f
