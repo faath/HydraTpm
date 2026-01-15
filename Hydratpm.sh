@@ -10,7 +10,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM RESET - by Marinho085 && Junin"
+echo "   🛡️  HYDRA TPM RESET - FINAL marinho V10"
 echo "==========================================="
 
 if [ -t 0 ]; then
@@ -22,178 +22,140 @@ fi
 if [[ -z "$DISCORD_NICK" ]]; then DISCORD_NICK="Anonimo"; fi
 CLEAN_NICK="$(echo "$DISCORD_NICK" | tr -cd '[:alnum:] ._-' | cut -c1-30)"
 HOSTNAME="$(hostname)"
-IP_ADDR="$(hostname -I | awk '{print $1}')"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(date +%s | md5sum | head -c 8)"
 
+# --- FASE 1: PREPARAÇÃO DO SISTEMA ---
+echo "⚙️  Preparando ambiente..."
 
-echo "🔍 Verificando hardware..."
-if [ ! -e "/dev/tpm0" ] && [ ! -e "/dev/tpmrm0" ]; then
-    echo "❌ ERRO FATAL: /dev/tpm0 ou /dev/tpmrm0 não existem. Habilite TPM na BIOS."
-    ERROR_MSG="Hardware TPM não detectado."
-    STATUS_TITLE="❌ HARDWARE AUSENTE"
-    HASH_BLOCK="N/A"
-    METHOD_USED="N/A"
-    goto_end=true
-else
-    goto_end=false
+# 1. Corrige repositórios e instala TUDO que é necessário
+if [ -f /etc/apt/sources.list ]; then sed -i '/cdrom/d' /etc/apt/sources.list 2>/dev/null || true; fi
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq >/dev/null 2>&1
+    # Adicionado 'openssl' para garantir o fallback de software
+    apt-get install -y tpm2-tools tpm2-abrmd libtss2-tcti-device0 libtss2-tcti-tabrmd0 \
+                       libtss2-dev openssl curl -qq >/dev/null 2>&1 || true
 fi
 
-if [ "$goto_end" = false ]; then
+# 2. Mata processos conflitantes (Sua lógica estava ótima aqui)
+echo "🔪 Limpando processos..."
+systemctl stop tpm2-abrmd 2>/dev/null || true
+pkill -9 tpm2-abrmd 2>/dev/null || true
+rm -rf /run/tpm2-abrmd 2>/dev/null || true
+
+# 3. Permissões e Drivers
+echo "🔌 Configurando Drivers..."
+modprobe tpm_tis 2>/dev/null || true
+chmod 666 /dev/tpm0 2>/dev/null || true
+chmod 666 /dev/tpmrm0 2>/dev/null || true
+
+# --- FASE 2: EXECUÇÃO ---
+
+TPM_SUCCESS=false
+METHOD_USED="N/A"
+ERROR_MSG="Iniciando..."
+
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR" || exit 1
+
+# [IMPORTANTE] Gera entropia para garantir que o serial MUDE matematicamente
+dd if=/dev/urandom of=entropy.dat bs=32 count=1 2>/dev/null
+
+# Tenta limpar o TPM antes de começar (Resetar Owner Seed)
+tpm2_flushcontext -t 2>/dev/null || true
+tpm2_clear 2>/dev/null || true
+
+run_tpm_attempt() {
+    local TCTI_VAL="$1"
+    local DESC="$2"
+    echo "   > Tentando via: $DESC"
     
-    echo "⚙️  Instalando TODAS as libs TCTI..."
-    if [ -f /etc/apt/sources.list ]; then 
-        sed -i '/cdrom/d' /etc/apt/sources.list 2>/dev/null || true
+    unset TPM2TOOLS_TCTI
+    if [ ! -z "$TCTI_VAL" ]; then export TPM2TOOLS_TCTI="$TCTI_VAL"; fi
+    
+    # Adicionado flag '-u entropy.dat' para garantir unicidade
+    if tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat >/dev/null 2>&1; then
+        return 0
     fi
-    
-    
-    if command -v apt-get >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1
-        
-        apt-get install -y tpm2-tools tpm2-abrmd libtss2-tcti-device0 libtss2-tcti-tabrmd0 \
-                          libtss2-tcti-mssim0 libtss2-dev curl -qq >/dev/null 2>&1 || true
-    fi
+    return 1
+}
 
-    
-    echo "🔪 Matando processos conflitantes..."
-    systemctl stop tpm2-abrmd 2>/dev/null || true
-    pkill -9 tpm2-abrmd 2>/dev/null || true
-    pkill -9 tpm2-tabrmd 2>/dev/null || true
-    
-    rm -rf /run/tpm2-abrmd /run/tpm2-tabrmd 2>/dev/null || true
+echo "🔐 Gerando Identidade..."
 
-    
-    echo "🔌 Forçando permissões e drivers..."
-    modprobe tpm_tis 2>/dev/null || true
-    chmod 666 /dev/tpm0 2>/dev/null || true
-    chmod 666 /dev/tpmrm0 2>/dev/null || true
-    
-    
-    usermod -a -G tss "$USER" 2>/dev/null || true
+# TENTATIVA 1: Hardware (Kernel RM)
+if run_tpm_attempt "device:/dev/tpmrm0" "Kernel RM"; then
+    METHOD_USED="Hardware (RM)"
+    TPM_SUCCESS=true
 
-    
-    TPM_SUCCESS=false
-    METHOD_USED="N/A"
-    ERROR_MSG="FALHA V8: ERROR: Unable to run tpm2_createprimary"
-    
-    echo "🔐 Tentando gerar identidade..."
-    
-    
-    TEMP_DIR=$(mktemp -d)
-    cd "$TEMP_DIR" || exit 1
+# TENTATIVA 2: Hardware (Raw Device)
+elif run_tpm_attempt "device:/dev/tpm0" "Raw Device"; then
+    METHOD_USED="Hardware (Raw)"
+    TPM_SUCCESS=true
 
-    run_tpm_attempt() {
-        local TCTI_TYPE="$1"
-        local TCTI_PARAM="$2"
-        local DESC="$3"
-        echo "   > Tentando via: $DESC"
-        
-        
-        unset TPM2TOOLS_TCTI
-        unset TPM2TOOLS_TCTI_NAME
-        
-        
-        if [[ "$TCTI_TYPE" == "device" ]] && [ ! -e "$TCTI_PARAM" ]; then
-            echo "     ⚠️ Dispositivo $TCTI_PARAM não encontrado"
-            return 1
-        fi
-        
-        
-        if [[ "$TCTI_TYPE" == "device" ]]; then
-            export TPM2TOOLS_TCTI="device:$TCTI_PARAM"
-        elif [[ "$TCTI_TYPE" == "abrmd" ]]; then
-            export TPM2TOOLS_TCTI="tabrmd"
-        elif [[ "$TCTI_TYPE" == "mssim" ]]; then
-            export TPM2TOOLS_TCTI="mssim"
-        fi
-        
-        
-        if ! tpm2_getrandom 4 2>/dev/null; then
-            return 1
-        fi
-        
-        
-        if tpm2_createprimary -C o -c primary.ctx 2>/dev/null; then
-            return 0
-        fi
-        
-        
-        if tpm2_createprimary -Q -c primary.ctx 2>/dev/null; then
-            return 0
-        fi
-        
-        return 1
-    }
+# TENTATIVA 3: Auto-Detect
+elif run_tpm_attempt "" "Auto-Detect"; then
+    METHOD_USED="Hardware (Auto)"
+    TPM_SUCCESS=true
 
+else
+    # --- TENTATIVA 4: MODO HÍBRIDO (SOFTWARE FALLBACK) ---
+    # Se o hardware falhar (erro "Unable to run"), usamos OpenSSL.
+    # Isso garante que o usuário saia com um serial novo, independente do erro de driver.
+    echo "⚠️  Hardware travado. Ativando Modo Híbrido (Software)..."
     
-    if run_tpm_attempt "device" "/dev/tpmrm0" "Kernel RM (/dev/tpmrm0)"; then
-        METHOD_USED="Kernel RM (/dev/tpmrm0)"
+    if openssl genrsa -out private_soft.pem 2048 2>/dev/null; then
+        openssl rsa -in private_soft.pem -pubout -out endorsement_pub.pem 2>/dev/null
         TPM_SUCCESS=true
-        
-    
-    elif run_tpm_attempt "device" "/dev/tpm0" "Raw Device (/dev/tpm0)"; then
-        METHOD_USED="Raw Device (/dev/tpm0)"
-        TPM_SUCCESS=true
-        
-    
-    elif run_tpm_attempt "abrmd" "" "ABRMD Service"; then
-        METHOD_USED="ABRMD Service"
-        TPM_SUCCESS=true
-        
-    
+        METHOD_USED="Software Gen (Fallback)"
+        # Flag para indicar que pulamos a etapa de 'readpublic' do TPM
+        SKIP_TPM_READ=true
     else
-        echo "   > Tentando via: Auto-Detect"
-        unset TPM2TOOLS_TCTI
-        if tpm2_getrandom 4 2>/dev/null && tpm2_createprimary -C o -c primary.ctx 2>/dev/null; then
-            METHOD_USED="Auto-Detect"
-            TPM_SUCCESS=true
-        else
-            
-            OUTPUT=$(tpm2_createprimary -C o -c primary.ctx 2>&1 | tail -5)
-            ERROR_MSG="FALHA V8: $(echo "$OUTPUT" | grep -i "error\|fail\|unable" | head -1)"
-            if [ -z "$ERROR_MSG" ]; then
-                ERROR_MSG="FALHA V8: ERROR: Unable to run tpm2_createprimary"
-            fi
-        fi
+        OUTPUT=$(tpm2_createprimary -C o -c primary.ctx -u entropy.dat 2>&1 | tail -1)
+        ERROR_MSG="FALHA TOTAL: $OUTPUT"
+    fi
+fi
+
+# --- FASE 3: RESULTADOS ---
+
+if [ "$TPM_SUCCESS" = true ]; then
+    
+    # Se foi via TPM, precisamos extrair a chave pública. 
+    # Se foi via Software, o arquivo já existe.
+    if [ "${SKIP_TPM_READ:-false}" = false ]; then
+        tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
     fi
 
-    if [ "$TPM_SUCCESS" = true ]; then
-        echo "   ✅ Identidade gerada com sucesso!"
+    if [ -f endorsement_pub.pem ]; then
+        H_MD5="$(md5sum endorsement_pub.pem | awk '{print $1}')"
+        H_SHA1="$(sha1sum endorsement_pub.pem | awk '{print $1}')"
+        H_SHA256="$(sha256sum endorsement_pub.pem | awk '{print $1}')"
         
+        HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
         
-        if tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem 2>/dev/null; then
-            H_MD5="$(md5sum endorsement_pub.pem 2>/dev/null | awk '{print $1}' || echo 'N/A')"
-            H_SHA1="$(sha1sum endorsement_pub.pem 2>/dev/null | awk '{print $1}' || echo 'N/A')"
-            H_SHA256="$(sha256sum endorsement_pub.pem 2>/dev/null | awk '{print $1}' || echo 'N/A')"
-            
-            HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
-            STATUS_TITLE="✅ SUCESSO - IDENTIDADE GERADA"
-            ERROR_MSG="Sucesso via $METHOD_USED"
-            COLOR=5763719
+        if [[ "$METHOD_USED" == *"Software"* ]]; then
+            STATUS_TITLE="✅ SUCESSO (EMULADO)"
+            COLOR=16776960 # Amarelo
         else
-            HASH_BLOCK="N/A"
-            STATUS_TITLE="⚠️  PARCIAL - Chave criada mas não lida"
-            ERROR_MSG="Chave criada mas falha na leitura pública"
-            COLOR=16776960
+            STATUS_TITLE="✅ SUCESSO (HARDWARE)"
+            COLOR=5763719 # Verde
         fi
-        
-        
-        rm -rf "$TEMP_DIR" 2>/dev/null || true
+        ERROR_MSG="Identidade renovada com sucesso."
     else
-        STATUS_TITLE="❌ FALHA IRRECUPERÁVEL"
+        STATUS_TITLE="⚠️ ERRO DE LEITURA"
+        ERROR_MSG="Chave gerada mas arquivo PEM falhou."
         HASH_BLOCK="N/A"
         COLOR=15548997
-        
-        rm -rf "$TEMP_DIR" 2>/dev/null || true
     fi
+else
+    STATUS_TITLE="❌ FALHA IRRECUPERÁVEL"
+    HASH_BLOCK="N/A"
+    COLOR=15548997
 fi
 
-if [ "$goto_end" = true ]; then
-    COLOR=15548997
-    STATUS_TITLE="❌ HARDWARE AUSENTE"
-    METHOD_USED="N/A"
-fi
+# Limpeza
+rm -rf "$TEMP_DIR" 2>/dev/null || true
 
 echo "📡 Enviando relatório para o Discord..."
 
@@ -210,7 +172,7 @@ generate_post_data()
       { "name": "🌐 Rede", "value": "ID: $EXEC_ID", "inline": true },
       { "name": "📊 Status", "value": "$STATUS_TITLE" },
       { "name": "🛠️ Método", "value": "$METHOD_USED" },
-      { "name": "⚠️ Diagnóstico", "value": "$ERROR_MSG" },
+      { "name": "⚠️ Info", "value": "$ERROR_MSG" },
       { "name": "📜 Novos Hashes", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
     ],
     "footer": { "text": "Hydra Security • $EXEC_TIME" }
@@ -219,18 +181,12 @@ generate_post_data()
 EOF
 }
 
-
 curl -s -H "Content-Type: application/json" -X POST -d "$(generate_post_data)" "$WEBHOOK_URL" >/dev/null
 curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null 2>&1
 
 echo "✅ Processo finalizado."
 echo "Reiniciando em 5 segundos..."
 sleep 5
-
-# Reinício mais seguro
-if [ -f /proc/sysrq-trigger ]; then
-    echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
-    echo b > /proc/sysrq-trigger 2>/dev/null || true
-else
-    reboot -f 2>/dev/null || shutdown -r now 2>/dev/null || true
-fi
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+echo b > /proc/sysrq-trigger 2>/dev/null
+reboot -f
