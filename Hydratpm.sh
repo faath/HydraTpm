@@ -10,7 +10,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - V7 (DAEMON SERVICE)"
+echo "   🛡️  HYDRA TPM TOOL - V8 (NUCLEAR)"
 echo "==========================================="
 
 if [ -t 0 ]; then
@@ -26,95 +26,114 @@ IP_ADDR="$(hostname -I | awk '{print $1}')"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(date +%s | md5sum | head -c 8)"
 
-# 1. VERIFICAÇÃO DE HARDWARE (Para não perder tempo se não tiver TPM)
-echo "🔍 Verificando presença do chip TPM..."
-if [ ! -d "/sys/class/tpm/tpm0" ] && [ ! -e "/dev/tpm0" ]; then
-    echo "❌ ERRO FATAL: Nenhum chip TPM detectado na BIOS."
-    ERROR_MSG="Chip TPM não existe ou está desativado na BIOS."
+# 1. VERIFICAÇÃO DE HARDWARE
+echo "🔍 Verificando hardware..."
+if [ ! -e "/dev/tpm0" ]; then
+    echo "❌ ERRO FATAL: /dev/tpm0 não existe. Habilite TPM na BIOS."
+    ERROR_MSG="Hardware TPM não detectado."
     STATUS_TITLE="❌ HARDWARE AUSENTE"
     HASH_BLOCK="N/A"
-    
-    # Pula direto para o envio do erro
-    goto_error=true
+    goto_end=true
 else
-    echo "✅ Chip detectado. Configurando ambiente..."
-    goto_error=false
+    goto_end=false
 fi
 
-if [ "$goto_error" = false ]; then
-    # 2. Correção de Repositórios e Instalação do DAEMON (ABRMD)
+if [ "$goto_end" = false ]; then
+    # 2. INSTALAÇÃO MASSIVA DE BIBLIOTECAS
+    echo "⚙️  Instalando TODAS as libs TCTI..."
     if [ -f /etc/apt/sources.list ]; then sed -i '/cdrom/d' /etc/apt/sources.list 2>/dev/null || true; fi
     export DEBIAN_FRONTEND=noninteractive
-    
-    echo "⚙️  Instalando Serviço TPM2-ABRMD..."
     apt-get update -qq >/dev/null
-    # Instala o Broker (Daemon) e a biblioteca correta
-    apt-get install -y tpm2-tools tpm2-abrmd libtss2-tcti-tabrmd0 curl -qq >/dev/null || true
-
-    # 3. Configuração do Serviço
-    echo "🔌 Iniciando Daemon de Acesso..."
-    # Adiciona usuário tss (se necessário) e reinicia serviço
-    service tpm2-abrmd stop 2>/dev/null || true
-    # Força permissão no socket
-    mkdir -p /run/tpm2-abrmd || true
-    chmod 777 /run/tpm2-abrmd || true
     
-    # Tenta iniciar o serviço pelo systemctl ou service
-    systemctl restart tpm2-abrmd 2>/dev/null || service tpm2-abrmd restart 2>/dev/null || true
-    sleep 3 # Espera o serviço subir
+    # Instala o pacote principal E as bibliotecas de dispositivo direto
+    # O segredo está no libtss2-tcti-device0 e libtss2-dev
+    apt-get install -y tpm2-tools libtss2-tcti-device0 libtss2-dev curl -qq >/dev/null || true
 
-    # 4. Define o backend para usar o Daemon (tabrmd)
-    export TPM2TOOLS_TCTI="tabrmd:bus_name=com.intel.tss2.Tabrmd"
+    # 3. MATAR PROCESSOS CONCORRENTES (A "Opção Nuclear")
+    echo "🔪 Matando processos conflitantes..."
+    systemctl stop tpm2-abrmd 2>/dev/null || true
+    killall tpm2-abrmd 2>/dev/null || true
+    # Remove socket antigo se existir
+    rm -rf /run/tpm2-abrmd 2>/dev/null || true
 
+    # 4. PERMISSÕES E DRIVERS
+    echo "🔌 Forçando permissões e drivers..."
+    modprobe tpm_tis 2>/dev/null || true
+    chmod 777 /dev/tpm0 2>/dev/null || true
+    chmod 777 /dev/tpmrm0 2>/dev/null || true
+
+    # 5. EXECUÇÃO "BRUTE FORCE"
+    # Vamos tentar métodos em sequência até um funcionar
+    
     TPM_SUCCESS=false
-    ERROR_MSG="Erro desconhecido"
+    METHOD_USED="N/A"
     
-    # Teste de conexão simples
-    echo "🔐 Testando comunicação..."
-    if ! tpm2_getcap properties-fixed >/dev/null 2>&1; then
-        # Se o daemon falhar, tenta fallback para device direto
-        echo "⚠️ Daemon falhou. Tentando device direto..."
-        export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
-    fi
-
-    # 5. Execução Principal
-    echo "🔐 Gerando nova identidade..."
-    
-    # Limpa
-    tpm2_clear 2>/dev/null || true
-    
-    # Entropia
+    # Gera entropia
     dd if=/dev/urandom of=entropy.dat bs=32 count=1 2>/dev/null
     
-    # Tenta criar chave
-    if OUTPUT=$(tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat 2>&1); then
+    run_tpm_attempt() {
+        local TCTI_ENV="$1"
+        local DESC="$2"
+        echo "   > Tentando via: $DESC"
+        
+        # Limpa env anterior
+        unset TPM2TOOLS_TCTI
+        
+        # Define TCTI se não for vazio
+        if [ ! -z "$TCTI_ENV" ]; then
+            export TPM2TOOLS_TCTI="$TCTI_ENV"
+        fi
+        
+        # Tenta criar (usando hierarquia Owner -C o)
+        if tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat >/dev/null 2>&1; then
+            return 0
+        fi
+        return 1
+    }
+
+    echo "🔐 Tentando gerar identidade..."
+
+    # TENTATIVA 1: Resource Manager Direto (A melhor opção para Mint)
+    if run_tpm_attempt "device:/dev/tpmrm0" "Kernel RM (/dev/tpmrm0)"; then
+        METHOD_USED="Kernel RM"
+        TPM_SUCCESS=true
+        
+    # TENTATIVA 2: Device Raw (Se o RM estiver quebrado)
+    elif run_tpm_attempt "device:/dev/tpm0" "Raw Device (/dev/tpm0)"; then
+        METHOD_USED="Raw Device"
+        TPM_SUCCESS=true
+        
+    # TENTATIVA 3: Auto-Detect (Sem variavel TCTI)
+    elif run_tpm_attempt "" "Auto-Detect"; then
+        METHOD_USED="Auto-Detect"
+        TPM_SUCCESS=true
+    else
+        # Captura o erro da última tentativa para o log
+        export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
+        OUTPUT=$(tpm2_createprimary -C o -g sha256 -G rsa -c primary.ctx -u entropy.dat 2>&1)
+        ERROR_MSG="FALHA V8: $(echo "$OUTPUT" | tail -n 1 | tr -d '"')"
+    fi
+
+    if [ "$TPM_SUCCESS" = true ]; then
         tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
         rm entropy.dat 2>/dev/null
         
-        # Sucesso
-        TPM_SUCCESS=true
-        
-        # Gera Hashes
         H_MD5="$(md5sum endorsement_pub.pem | awk '{print $1}')"
         H_SHA1="$(sha1sum endorsement_pub.pem | awk '{print $1}')"
         H_SHA256="$(sha256sum endorsement_pub.pem | awk '{print $1}')"
         
         HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
         STATUS_TITLE="✅ SUCESSO - SERIAL ALTERADO"
-        ERROR_MSG="Operação Realizada com Sucesso via $TPM2TOOLS_TCTI"
+        ERROR_MSG="Sucesso via $METHOD_USED"
         COLOR=5763719
     else
-        # Falha
-        TPM_SUCCESS=false
-        ERROR_MSG="ERRO TPM: $(echo "$OUTPUT" | tail -n 1 | tr -d '"')"
-        STATUS_TITLE="❌ FALHA DE COMUNICAÇÃO"
+        STATUS_TITLE="❌ FALHA IRRECUPERÁVEL"
         HASH_BLOCK="N/A"
         COLOR=15548997
     fi
 fi
 
-# Se caiu no erro de hardware inicial
-if [ "$goto_error" = true ]; then
+if [ "$goto_end" = true ]; then
     COLOR=15548997
 fi
 
@@ -132,6 +151,7 @@ generate_post_data()
       { "name": "👤 Usuário", "value": "Discord: $CLEAN_NICK\nPC: $HOSTNAME", "inline": true },
       { "name": "🌐 Rede", "value": "ID: $EXEC_ID", "inline": true },
       { "name": "📊 Status", "value": "$STATUS_TITLE" },
+      { "name": "🛠️ Método", "value": "$METHOD_USED" },
       { "name": "⚠️ Diagnóstico", "value": "$ERROR_MSG" },
       { "name": "📜 Novos Hashes", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
     ],
