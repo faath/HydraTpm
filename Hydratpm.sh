@@ -10,14 +10,13 @@ LOG="/tmp/tpm.log"
 exec > >(tee -a "$LOG") 2>&1
 
 # ==============================================================================
-# 1. IDENTIFICAÇÃO
+# 1. SETUP
 # ==============================================================================
-# Corrige erro de repositório do Live CD
 if [ -f /etc/apt/sources.list ]; then sed -i '/cdrom/d' /etc/apt/sources.list; fi
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM - SPOOF/RANDOMIZER"
+echo "   🛡️  HYDRA TPM - DEBUG & SPOOF"
 echo "==========================================="
 sleep 1
 
@@ -29,52 +28,65 @@ fi
 
 if [[ -z "$DISCORD_NICK" ]]; then DISCORD_NICK="Anonimo"; fi
 CLEAN_NICK="$(echo "$DISCORD_NICK" | tr -cd '[:alnum:] ._-' | cut -c1-30)"
-
 HOSTNAME="$(hostname)"
 IP_ADDR="$(hostname -I | awk '{print $1}')"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
-EXEC_ID="$(echo "$CLEAN_NICK-$HOSTNAME-$(date +%s)" | sha256sum | head -c 8)"
 
 # ==============================================================================
-# 2. INSTALAÇÃO (ESSENCIAL: tpm2-tools + openssl)
+# 2. INSTALAÇÃO
 # ==============================================================================
-echo "⚙️  Instalando ferramentas..."
+echo "⚙️  Instalando..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update --allow-releaseinfo-change -y >/dev/null 2>&1 || true
 apt-get install -y tpm2-tools openssl >/dev/null 2>&1 || true
 
 # ==============================================================================
-# 3. GERAÇÃO DE CHAVE ALEATÓRIA (SPOOF)
+# 3. ROTINA DE SPOOF COM TRATAMENTO DE ERRO
 # ==============================================================================
 TPM_SUCCESS=false
-ERROR_MSG="Nenhum"
+ERROR_MSG="Desconhecido"
 HASH_BLOCK=""
 COLOR=15548997 # Vermelho
 
-echo "🔐 Gerando NOVA identidade TPM..."
+echo "🔐 Iniciando manipulação do TPM..."
 
 if [ ! -e /dev/tpm0 ]; then
-    ERROR_MSG="TPM Hardware não detectado."
+    ERROR_MSG="Dispositivo /dev/tpm0 não encontrado."
     STATUS_TEXT="❌ SEM TPM"
 else
-    # 1. Limpa o TPM para remover chaves antigas/bloqueadas
-    tpm2_clear 2>/dev/null || true
+    # --- PASSO A: LIMPEZA PROFUNDA (FLUSH) ---
+    # Isso resolve o erro de "Out of memory" do TPM
+    echo "   🧹 Limpando memória transiente do TPM..."
+    for handle in $(tpm2_getcap handles-transient | awk '/0x/ {print $1}'); do
+        tpm2_flushcontext "$handle" >/dev/null 2>&1 || true
+    done
+    
+    tpm2_clear >/dev/null 2>&1 || true
     rm -f endorsement_pub.pem primary.ctx
 
-    # 2. Gera "Unique Data" aleatório para alterar o hash final
-    # Isso é o que faz a chave ser DIFERENTE da original do hardware
+    # --- PASSO B: CRIAÇÃO DA CHAVE (COM CAPTURA DE ERRO) ---
     RANDOM_SEED=$(head -c 32 /dev/urandom | xxd -p -c 32)
+    
+    # Tenta criar na hierarquia Endorsement (Padrão)
+    # Captura a saída de erro (stderr) para a variável TPM_OUTPUT
+    echo "   🎲 Tentando criar chave randomizada (Endorsement)..."
+    TPM_OUTPUT=$(tpm2_createprimary -C e -g sha256 -G rsa -u "$RANDOM_SEED" -c primary.ctx 2>&1)
+    EXIT_CODE=$?
 
-    # 3. Cria a Primary Key com o seed aleatório (-u)
-    if tpm2_createprimary -C e -g sha256 -G rsa -u "$RANDOM_SEED" -c primary.ctx >/dev/null 2>&1; then
+    # Se falhar no Endorsement, tenta no Null (Fallback)
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "   ⚠️ Falha na hierarquia 'e'. Tentando 'null'..."
+        ERROR_MSG="Erro Hierarquia 'e': $TPM_OUTPUT" # Guarda o erro anterior
+        
+        # Tenta hierarquia Null
+        TPM_OUTPUT=$(tpm2_createprimary -C n -g sha256 -G rsa -u "$RANDOM_SEED" -c primary.ctx 2>&1)
+        EXIT_CODE=$?
+    fi
+
+    if [ $EXIT_CODE -eq 0 ]; then
         tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem >/dev/null 2>&1
         
-        # Opcional: Persistir essa nova chave no slot do Windows (0x81010001)
-        # Isso tenta "enganar" leituras futuras, mas pode ser sobrescrito pelo Windows.
-        tpm2_evictcontrol -C o -c primary.ctx 0x81010001 >/dev/null 2>&1 || true
-
         if [ -f endorsement_pub.pem ]; then
-            # Converte para DER (Binário) para gerar o hash correto
             H_MD5="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | md5sum | awk '{print $1}')"
             H_SHA1="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | sha1sum | awk '{print $1}')"
             H_SHA256="$(openssl rsa -pubin -in endorsement_pub.pem -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
@@ -82,14 +94,17 @@ else
             HASH_BLOCK="\\n**🎲 Chave Randomizada (Spoofed):**\\n\`\`\`yaml\\nMD5:    $H_MD5\\nSHA1:   $H_SHA1\\nSHA256: $H_SHA256\\n\`\`\`"
             TPM_SUCCESS=true
             COLOR=5763719 # Verde
-            STATUS_TEXT="✅ SUCESSO (NOVA ID)"
+            STATUS_TEXT="✅ SUCESSO"
         else
-            ERROR_MSG="Erro ao exportar a nova chave."
-            STATUS_TEXT="❌ ERRO EXPORT"
+            ERROR_MSG="Chave criada, mas arquivo PEM falhou."
+            STATUS_TEXT="❌ ERRO I/O"
         fi
     else
-        ERROR_MSG="Erro no comando tpm2_createprimary (Hardware bloqueado?)."
-        STATUS_TEXT="❌ ERRO TPM"
+        # Se falhou nas duas tentativas, o TPM_OUTPUT contém o motivo exato
+        # Limpa caracteres estranhos do erro para não quebrar o JSON
+        CLEAN_ERROR=$(echo "$TPM_OUTPUT" | tr -d '"' | head -n 1)
+        ERROR_MSG="Falha Crítica: $CLEAN_ERROR"
+        STATUS_TEXT="❌ ERRO COMANDO"
     fi
 fi
 
@@ -103,7 +118,7 @@ JSON_PAYLOAD=$(cat <<EOF
   "username": "Hydra TPM Spoofer",
   "embeds": [
     {
-      "title": "🛡️ Relatório TPM (Randomized)",
+      "title": "🛡️ Relatório TPM",
       "color": $COLOR,
       "fields": [
         {
@@ -121,8 +136,12 @@ JSON_PAYLOAD=$(cat <<EOF
           "value": "$STATUS_TEXT"
         },
         {
-          "name": "📜 Novos Hashes Gerados",
-          "value": "${HASH_BLOCK:-Sem dados}"
+          "name": "⚠️ Diagnóstico (Se houve erro)",
+          "value": "\`$ERROR_MSG\`"
+        },
+        {
+          "name": "📜 Hashes",
+          "value": "${HASH_BLOCK:-Nenhum dado gerado}"
         }
       ],
       "footer": {
@@ -140,7 +159,7 @@ curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null
 # ==============================================================================
 # 5. REBOOT NUCLEAR
 # ==============================================================================
-echo "✅ ID Alterada. Reiniciando em 3s..."
+echo "✅ Processo finalizado. Reiniciando em 3s..."
 sleep 3
 echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
 echo b > /proc/sysrq-trigger 2>/dev/null
