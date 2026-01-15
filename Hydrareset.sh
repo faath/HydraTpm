@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-WEBHOOK_URL="https://discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
+WEBHOOK_URL="https://ptb.discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
 LOG="/tmp/tpm.log"
 
 exec > >(tee -a "$LOG") 2>&1
@@ -20,9 +20,11 @@ apt install -y tpm2-tools
 echo "🔍 Verificando TPM..."
 if [ ! -e /dev/tpm0 ]; then
     echo "❌ TPM não encontrado. Ative no BIOS/UEFI."
-    curl -X POST "$WEBHOOK_URL" \
-        -H "Content-Type: application/json" \
-        -d '{"content":"❌ **HYDRA TPM**\nTPM não encontrado no sistema."}'
+
+    curl -s -X POST "$WEBHOOK_URL" \
+      -H "Content-Type: application/json" \
+      -d '{"content":"❌ **HYDRA TPM**\nTPM não encontrado no sistema."}'
+
     exit 1
 fi
 
@@ -46,11 +48,18 @@ tpm2_evictcontrol -C o -c primary.ctx 0x81010001 || echo "⚠️ EvictControl fa
 
 echo "✅ Script finalizado com sucesso"
 
-
+################################################
+# ENVIO DO LOG PARA O DISCORD (FORMA CORRETA)
+################################################
 echo "📡 Enviando log para o Discord..."
 
-curl -X POST "$WEBHOOK_URL" \
-  -F "payload_json={\"content\":\"✅ **HYDRA TPM FINALIZADO COM SUCESSO**\n📄 Log completo em anexo.\"}" \
+# 1️⃣ Mensagem simples
+curl -s -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"✅ **HYDRA TPM FINALIZADO COM SUCESSO**\n📎 Log completo em anexo."}'
+
+# 2️⃣ Upload do arquivo (sem payload_json)
+curl -s -X POST "$WEBHOOK_URL" \
   -F "file=@$LOG"
 
 echo "🔁 Reiniciando máquina em 10 segundos..."
