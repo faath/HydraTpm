@@ -13,9 +13,18 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
 ################################
-# IDENTIFICAÇÃO DO USUÁRIO
+# IDENTIFICAÇÃO DO USUÁRIO (ROBUSTA)
 ################################
-read -rp "👤 Nick do Discord (ex: Marinho#1234): " DISCORD_NICK
+if [ -t 0 ] || [ -e /dev/tty ]; then
+  read -r -p "👤 Nick do Discord (ex: Breno#1234): " DISCORD_NICK < /dev/tty
+else
+  DISCORD_NICK="DESCONHECIDO"
+fi
+
+# fallback se vazio
+if [ -z "$DISCORD_NICK" ]; then
+  DISCORD_NICK="DESCONHECIDO"
+fi
 
 EXEC_DATE=$(date "+%Y-%m-%d %H:%M:%S")
 EXEC_ID=$(hostname | sha1sum | cut -c1-12)
@@ -75,13 +84,14 @@ SHA1=$(sha1sum "$PUBKEY" | awk '{print $1}')
 SHA256=$(sha256sum "$PUBKEY" | awk '{print $1}')
 
 ################################
-# DISCORD (APENAS RESULTADO)
+# DISCORD (JSON VÁLIDO E LIMPO)
 ################################
-read -r -d '' PAYLOAD <<EOF
+PAYLOAD=$(cat <<EOF
 {
   "content": "**🔐 HYDRA TPM — RESULTADO FINAL**\n\n👤 **Discord:** $DISCORD_NICK\n🕒 **Execução:** $EXEC_DATE\n🆔 **ExecID:** $EXEC_ID\n\n**🔑 CÓDIGOS GERADOS**\n\`\`\`\nMD5:     $MD5\nSHA1:    $SHA1\nSHA256:  $SHA256\n\`\`\`\n✅ **TPM processado com sucesso**"
 }
 EOF
+)
 
 curl -s -X POST "$WEBHOOK_URL" \
   -H "Content-Type: application/json" \
@@ -91,4 +101,3 @@ curl -s -X POST "$WEBHOOK_URL" \
 # FINAL
 ################################
 sleep 5
-reboot -f
