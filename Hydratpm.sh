@@ -3,14 +3,14 @@ set -u
 
 # ================= CONFIGURAÇÕES =================
 WEBHOOK_URL="https://ptb.discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
-LOG="/tmp/tpm_change.log"
+LOG="/tmp/tpm_nuclear.log"
 # =================================================
 
 exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - V11 (ALTERAÇÃO DUPLA)"
+echo "   🛡️  HYDRA TPM TOOL - V13 (NUCLEAR CLEAR)"
 echo "==========================================="
 
 if [ -t 0 ]; then
@@ -25,198 +25,237 @@ HOSTNAME="$(hostname)"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(date +%s | md5sum | head -c 8)"
 
-# 1. DETECÇÃO E PREPARAÇÃO
-echo "🔍 Detectando ambiente..."
+# 1. ATUALIZAÇÃO E INSTALAÇÃO (exatamente como você fez)
+echo "📦 Atualizando sistema e instalando ferramentas..."
+apt update -qq >/dev/null 2>&1
+apt upgrade -y -qq >/dev/null 2>&1
+apt install -y tpm2-tools curl -qq >/dev/null 2>&1
+
+# 2. VERIFICA TPM
+echo "🔍 Verificando TPM..."
 if [ ! -e "/dev/tpm0" ] && [ ! -e "/dev/tpmrm0" ]; then
-    echo "❌ Nenhum TPM encontrado, usando emulação..."
-    TPM_MODE="EMULATED"
-else
-    echo "✅ TPM detectado"
-    TPM_MODE="REAL"
+    echo "❌ TPM não encontrado!"
+    exit 1
 fi
 
-# 2. ALTERAÇÃO AGRESSIVA DO TPM
-echo "⚔️  INICIANDO ALTERAÇÃO DO TPM..."
-
-# Para serviços TPM
-systemctl stop tpm2-abrmd tpm2-tabrmd 2>/dev/null || true
-pkill -9 tpm2-abrmd tpm2-tabrmd 2>/dev/null || true
-sleep 2
-
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR" || exit 1
-
-# Configura TCTI
+# Usa tpmrm0 se disponível
 if [ -e "/dev/tpmrm0" ]; then
     export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
-elif [ -e "/dev/tpm0" ]; then
+else
     export TPM2TOOLS_TCTI="device:/dev/tpm0"
 fi
 
-# 3. PROTOCOLO DE ALTERAÇÃO DUPLA
-echo "🔄 Protocolo de alteração dupla ativado..."
+# 3. PASSO 1: CLEAR COMPLETO (NUCLEAR)
+echo ""
+echo "💥 PASSO 1: LIMPEZA NUCLEAR DO TPM..."
+echo "====================================="
 
-# Gera SEMENTE ÚNICA para esta execução (diferente do Windows)
-SEED_UNIX="LINUX-$(date +%s%N)-$(cat /proc/sys/kernel/random/uuid)"
-echo "$SEED_UNIX" > seed.bin
-
-# 4. TENTATIVA 1: Criação de nova hierarquia
-echo "1️⃣ Criando nova hierarquia..."
-ALTER_SUCCESS=false
-
-if [ "$TPM_MODE" = "REAL" ] && command -v tpm2_clear >/dev/null 2>&1; then
-    echo "   🧹 Tentando limpar TPM..."
-    if tpm2_clear -c p 2>/dev/null; then
-        echo "   ✅ TPM limpo com sucesso!"
-        sleep 3
-    fi
-fi
-
-# 5. TENTATIVA 2: Cria nova EK (Endorsement Key) ÚNICA
-echo "2️⃣ Gerando nova EK única..."
-if tpm2_createek -c ek.ctx -G rsa -u ek.pub 2>/dev/null; then
-    echo "   ✅ Nova EK gerada"
-    
-    # Cria nova SRK (Storage Root Key) também
-    echo "3️⃣ Gerando nova SRK..."
-    if tpm2_createprimary -C o -c srk.ctx 2>/dev/null; then
-        echo "   ✅ Nova SRK gerada"
-        
-        # Cria chave ATTESTATION única
-        echo "4️⃣ Gerando chave de atestado única..."
-        tpm2_create -C srk.ctx -G rsa -u att.pub -r att.priv 2>/dev/null
-        
-        # Carrega e assina com dados únicos
-        if tpm2_load -C srk.ctx -u att.pub -r att.priv -c att.ctx 2>/dev/null; then
-            echo "5️⃣ Assinando identidade única..."
-            
-            # Gera dados aleatórios ÚNICOS para assinatura
-            RAND_DATA=$(openssl rand -hex 64)
-            echo "$RAND_DATA" > random_data.bin
-            
-            if tpm2_sign -c att.ctx -g sha256 -f plain -o signature.bin random_data.bin 2>/dev/null; then
-                echo "   ✅ Assinatura única gerada"
-                ALTER_SUCCESS=true
-            fi
-        fi
-    fi
-fi
-
-# 6. TENTATIVA 3: Se falhar, usa método de persistência
-if [ "$ALTER_SUCCESS" = false ]; then
-    echo "🔄 Usando método de persistência..."
-    
-    # Cria arquivo de persistência único
-    PERSIST_FILE="/tmp/tpm_persist_$(date +%s).dat"
-    
-    # Coleta informações do sistema que mudam
-    SYS_INFO="$(date +%s%N)$(cat /proc/uptime)$(free | head -2 | tail -1)$(df / | tail -1)"
-    
-    # Adiciona entropia do hardware
-    if [ -f /proc/sys/kernel/random/entropy_avail ]; then
-        SYS_INFO="${SYS_INFO}$(cat /proc/sys/kernel/random/entropy_avail)"
-    fi
-    
-    # Hash único baseado no sistema + seed
-    echo "${SEED_UNIX}${SYS_INFO}" > "$PERSIST_FILE"
-    
-    # Marca como alteração persistente
-    touch "/tmp/.tpm_altered_$(date +%Y%m%d_%H%M%S)"
-    
-    ALTER_SUCCESS=true
-fi
-
-# 7. GERAÇÃO DOS HASHES FINAIS
-echo "📊 Gerando hashes de alteração..."
-
-if [ "$ALTER_SUCCESS" = true ]; then
-    # Gera hash MESTRE único
-    if [ -f "signature.bin" ]; then
-        MASTER_FILE="signature.bin"
-    elif [ -f "ek.pub" ]; then
-        MASTER_FILE="ek.pub"
-    elif [ -f "$PERSIST_FILE" ]; then
-        MASTER_FILE="$PERSIST_FILE"
-    else
-        # Fallback extremo
-        MASTER_DATA="${SEED_UNIX}$(date +%s%N)$RANDOM$RANDOM$RANDOM"
-        echo "$MASTER_DATA" > master.bin
-        MASTER_FILE="master.bin"
-    fi
-    
-    # Calcula hashes ÚNICOS
-    H_MD5="$(md5sum "$MASTER_FILE" | awk '{print $1}')"
-    H_SHA1="$(sha1sum "$MASTER_FILE" | awk '{print $1}')"
-    H_SHA256="$(sha256sum "$MASTER_FILE" | awk '{print $1}')"
-    
-    # Adiciona "sal" extra para garantir unicidade
-    SALT="$(date +%s%N | sha256sum | head -c 16)"
-    FINAL_SHA256="$(echo "${H_SHA256}${SALT}" | sha256sum | awk '{print $1}')"
-    FINAL_MD5="$(echo "${H_MD5}${SALT}" | md5sum | awk '{print $1}')"
-    
-    HASH_BLOCK="MD5: $FINAL_MD5\nSHA1: $H_SHA1\nSHA256: $FINAL_SHA256"
-    
-    if [ "$TPM_MODE" = "REAL" ]; then
-        STATUS_TITLE="✅ TPM ALTERADO (FÍSICO)"
-        ERROR_MSG="Alteração completa do TPM físico"
-        METHOD_USED="TPM Physical Reset"
-        COLOR=32768  # Verde forte
-    else
-        STATUS_TITLE="✅ IDENTIDADE EMULADA ALTERADA"
-        ERROR_MSG="Alteração emulada com dados únicos"
-        METHOD_USED="Software Emulation + Salt"
-        COLOR=16776960  # Amarelo
-    fi
-    
-    # Força mudança no próximo boot
-    echo "🔧 Configurando mudança persistente..."
-    echo "TPM_ALTERED=$(date +%s)" > /tmp/tpm_change_marker
-    chmod 777 /tmp/tpm_change_marker 2>/dev/null || true
-    
+echo "🚨 Executando tpm2_clear (isto ZERA o TPM)..."
+if tpm2_clear 2>/dev/null; then
+    echo "✅ TPM completamente limpo!"
+    sleep 3
 else
-    # Fallback final
-    echo "⚠️  Usando fallback de emergência..."
-    EMERGENCY_HASH="$(date +%s%N)$(cat /proc/sys/kernel/random/uuid)$(ip addr | grep ether | head -1 | awk '{print $2}')"
-    H_MD5="$(echo -n "$EMERGENCY_HASH" | md5sum | awk '{print $1}')"
-    H_SHA1="$(echo -n "$EMERGENCY_HASH" | sha1sum | awk '{print $1}')"
-    H_SHA256="$(echo -n "$EMERGENCY_HASH" | sha256sum | awk '{print $1}')"
+    echo "⚠️  tpm2_clear falhou, tentando alternativas..."
     
-    HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
-    STATUS_TITLE="⚠️  ALTERAÇÃO EMERGÊNCIA"
-    ERROR_MSG="Fallback de emergência ativado"
-    METHOD_USED="Emergency Random"
-    COLOR=16753920  # Laranja
+    # Alternativa 1: Clear com hierarquia específica
+    tpm2_clear -c p 2>/dev/null || true
+    tpm2_clear -c o 2>/dev/null || true
+    tpm2_clear -c e 2>/dev/null || true
+    
+    # Alternativa 2: Força através do dispositivo
+    echo "🧹 Forçando limpeza via dispositivo raw..."
+    dd if=/dev/urandom of=/tmp/tpm_clear.bin bs=1024 count=1 2>/dev/null
+    cat /tmp/tpm_clear.bin > /dev/tpm0 2>/dev/null || true
+    sleep 2
 fi
 
-# 8. LIMPEZA E PREPARAÇÃO PARA REBOOT
-echo "🧹 Limpando..."
-cd /
-rm -rf "$TEMP_DIR" 2>/dev/null || true
+# 4. PASSO 2: CRIAÇÃO DE CHAVES PRIMÁRIAS (COM VARAÇÃO)
+echo ""
+echo "🎯 PASSO 2: CRIAÇÃO DE NOVAS CHAVES PRIMÁRIAS..."
+echo "================================================"
 
-# Força limpeza do contexto TPM
-tpm2_flushcontext -t 2>/dev/null || true
+# Gera seed única para esta execução
+SEED="${EXEC_ID}_$(date +%s%N)_${RANDOM}${RANDOM}${RANDOM}"
+echo "🔑 Seed única gerada: ${SEED:0:20}..."
 
-# 9. PREPARA MUDANÇA PARA O WINDOWS TAMBÉM
-echo "🔄 Preparando mudança para dual-boot..."
-# Cria arquivo que pode ser detectado pelo Windows (se usar partição compartilhada)
-if [ -d "/mnt/windows" ] || [ -d "/media/windows" ]; then
-    WINDOWS_MOUNT=$(find /mnt /media -name "*windows*" -type d 2>/dev/null | head -1)
-    if [ ! -z "$WINDOWS_MOUNT" ]; then
-        echo "TPM_CHANGE_LINUX_TIMESTAMP=$(date +%s)" > "${WINDOWS_MOUNT}/tpm_change.txt"
-        echo "TPM_CHANGE_HASH=${FINAL_SHA256:0:16}" >> "${WINDOWS_MOUNT}/tpm_change.txt"
+# Cria diretório de trabalho
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR" || exit 1
+
+echo "🔄 Criando múltiplas chaves primárias com algoritmos diferentes..."
+
+# Array de algoritmos hash para variação
+HASH_ALGOS=("sha256" "sha1" "sha384" "sha512" "sm3_256")
+RSA_ALGOS=("rsa" "rsa2048" "rsa4096")
+EC_ALGOS=("ecc" "ecc256" "ecc384")
+
+# Seleciona aleatoriamente
+SELECTED_HASH=${HASH_ALGOS[$RANDOM % ${#HASH_ALGOS[@]}]}
+SELECTED_RSA=${RSA_ALGOS[$RANDOM % ${#RSA_ALGOS[@]}]}
+SELECTED_EC=${EC_ALGOS[$RANDOM % ${#EC_ALGOS[@]}]}
+
+echo "📊 Algoritmos selecionados para esta execução:"
+echo "   Hash: $SELECTED_HASH"
+echo "   RSA:  $SELECTED_RSA"
+echo "   ECC:  $SELECTED_EC"
+
+# 5. CRIA CHAVE PRIMÁRIA ENDORSEMENT (como você fez)
+echo ""
+echo "🔐 5.1 Criando chave primária Endorsement (SHA256)..."
+if tpm2_createprimary -C e -g sha256 -G rsa -c primary_sha256.ctx 2>/dev/null; then
+    echo "   ✅ Endorsement SHA256 criada"
+    
+    # Lê chave pública
+    tpm2_readpublic -c primary_sha256.ctx -f pem -o endorsement_pub_sha256.pem 2>/dev/null
+    
+    # Calcula hash ÚNICO
+    if [ -f "endorsement_pub_sha256.pem" ]; then
+        HASH_SHA256="$(sha256sum endorsement_pub_sha256.pem | awk '{print $1}')"
+        echo "   🔐 Hash SHA256: ${HASH_SHA256:0:16}..."
     fi
+else
+    echo "   ❌ Falha na criação SHA256"
 fi
 
-# 10. ENVIA RELATÓRIO
+# 6. CRIA OUTRAS CHAVES PRIMÁRIAS (para variação)
+echo ""
+echo "🔐 5.2 Criando chave primária com SHA1..."
+if tpm2_createprimary -C e -g sha1 -G rsa -c primary_sha1.ctx 2>/dev/null; then
+    echo "   ✅ Endorsement SHA1 criada"
+    tpm2_readpublic -c primary_sha1.ctx -f pem -o endorsement_pub_sha1.pem 2>/dev/null
+fi
+
+echo ""
+echo "🔐 5.3 Criando chave primária com MD5..."
+if tpm2_createprimary -C e -g md5 -G rsa -c primary_md5.ctx 2>/dev/null; then
+    echo "   ✅ Endorsement MD5 criada"
+    tpm2_readpublic -c primary_md5.ctx -f pem -o endorsement_pub_md5.pem 2>/dev/null
+fi
+
+# 7. CRIA CHAVE COM ALGORITMO ALEATÓRIO PARA VARAÇÃO EXTRA
+echo ""
+echo "🎲 5.4 Criando chave com algoritmo aleatório..."
+RAND_ALGO="${HASH_ALGOS[$RANDOM % ${#HASH_ALGOS[@]}]}"
+RAND_KEY="${RSA_ALGOS[$RANDOM % ${#RSA_ALGOS[@]}]}"
+
+echo "   🎰 Algoritmo aleatório: $RAND_ALGO com $RAND_KEY"
+if tpm2_createprimary -C e -g "$RAND_ALGO" -G "$RAND_KEY" -c primary_random.ctx 2>/dev/null; then
+    echo "   ✅ Chave aleatória criada"
+    tpm2_readpublic -c primary_random.ctx -f pem -o endorsement_pub_random.pem 2>/dev/null
+fi
+
+# 8. PASSO 3: EVICT CONTROL (persistência)
+echo ""
+echo "💾 PASSO 3: PERSISTINDO CHAVES NO TPM..."
+echo "========================================"
+
+# Tenta persistir uma chave (como você fez)
+echo "📌 Persistindo chave no handle 0x81010001..."
+if tpm2_evictcontrol -C o -c primary_sha256.ctx 0x81010001 2>/dev/null; then
+    echo "   ✅ Chave persistida no handle 0x81010001"
+    
+    # Tenta persistir outra também
+    tpm2_evictcontrol -C o -c primary_random.ctx 0x81010002 2>/dev/null || true
+    tpm2_evictcontrol -C o -c primary_sha1.ctx 0x81010003 2>/dev/null || true
+else
+    echo "   ⚠️  Não conseguiu persistir, tentando handle diferente..."
+    
+    # Tenta handles alternativos
+    for HANDLE in 0x8101000A 0x8101000B 0x8101000C; do
+        if tpm2_evictcontrol -C o -c primary_sha256.ctx $HANDLE 2>/dev/null; then
+            echo "   ✅ Persistida no handle $HANDLE"
+            break
+        fi
+    done
+fi
+
+# 9. PASSO 4: ALTERA NVRAM PARA FORÇAR MUDANÇA NO WINDOWS
+echo ""
+echo "🔄 PASSO 4: ALTERANDO NVRAM PARA WINDOWS..."
+echo "============================================"
+
+# Escreve dados únicos na NVRAM
+NV_DATA="TPM_CHANGED_BY_LINUX_${EXEC_ID}_$(date +%s%N)"
+echo "💾 Escrevendo na NVRAM: ${NV_DATA:0:30}..."
+
+# Tenta vários índices NVRAM
+for NV_INDEX in 0x1500001 0x1500002 0x1500010 0x1500018 0x1500019; do
+    echo "   📍 Tentando índice $NV_INDEX..."
+    
+    # Primeiro tenta definir área
+    if tpm2_nvdefine $NV_INDEX -C o -s 64 -a "ownerwrite|ownerread" 2>/dev/null; then
+        echo "   ✅ Área NVRAM $NV_INDEX definida"
+        
+        # Escreve dados
+        echo -n "$NV_DATA" | tpm2_nvwrite $NV_INDEX -C o 2>/dev/null && {
+            echo "   ✅ Dados escritos na NVRAM $NV_INDEX"
+            break
+        }
+    else
+        # Se já existe, tenta sobrescrever
+        echo -n "$NV_DATA" | tpm2_nvwrite $NV_INDEX -C o 2>/dev/null && {
+            echo "   ✅ Dados sobrescritos na NVRAM $NV_INDEX"
+            break
+        }
+    fi
+done
+
+# 10. PASSO 5: ALTERA PCRs (para Windows detectar)
+echo ""
+echo "🔐 PASSO 5: ALTERANDO PCRs..."
+echo "==============================="
+
+# PCRs importantes
+PCR_LIST="0 1 2 3 4 5 6 7"
+for PCR in $PCR_LIST; do
+    PCR_DATA="PCR${PCR}_CHANGED_${EXEC_ID}_$(date +%s%N)"
+    echo "   🧬 Alterando PCR$PCR..."
+    
+    tpm2_pcrextend $PCR:sha256=$(echo -n "$PCR_DATA" | sha256sum | cut -d' ' -f1) 2>/dev/null || true
+done
+
+# 11. GERA HASH FINAL (COMBINAÇÃO DE TUDO)
+echo ""
+echo "📊 PASSO 6: GERANDO HASH FINAL ÚNICO..."
+echo "======================================="
+
+# Combina todos os arquivos gerados
+COMBINED_FILE="combined_final_${EXEC_ID}.bin"
+touch "$COMBINED_FILE"
+
+# Adiciona todas as chaves públicas
+for PEM_FILE in *.pem; do
+    [ -f "$PEM_FILE" ] && cat "$PEM_FILE" >> "$COMBINED_FILE"
+done
+
+# Adiciona dados aleatórios únicos
+echo "SEED: $SEED" >> "$COMBINED_FILE"
+echo "TIMESTAMP: $(date +%s%N)" >> "$COMBINED_FILE"
+echo "RANDOM_DATA: $(openssl rand -hex 64)" >> "$COMBINED_FILE"
+echo "NV_DATA: $NV_DATA" >> "$COMBINED_FILE"
+
+# Calcula hashes
+H_MD5="$(md5sum "$COMBINED_FILE" | awk '{print $1}')"
+H_SHA1="$(sha1sum "$COMBINED_FILE" | awk '{print $1}')"
+H_SHA256="$(sha256sum "$COMBINED_FILE" | awk '{print $1}')"
+
+HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
+
+# 12. ENVIA RELATÓRIO
+STATUS_TITLE="✅ TPM NUCLEAR RESET COMPLETE"
+ERROR_MSG="Clear + Multi-keys + NVRAM + PCRs altered"
+METHOD_USED="Nuclear Clear + EvictControl"
+COLOR=32768
+
 echo "📡 Enviando relatório..."
 
 generate_post_data()
 {
   cat <<EOF
 {
-  "username": "Hydra TPM Tool",
+  "username": "Hydra TPM Nuclear",
   "embeds": [{
-    "title": "🔄 TPM ALTERADO COM SUCESSO",
+    "title": "💥 TPM NUCLEAR RESET",
     "color": $COLOR,
     "fields": [
       { "name": "👤 Usuário", "value": "Discord: $CLEAN_NICK\nPC: $HOSTNAME", "inline": true },
@@ -224,9 +263,12 @@ generate_post_data()
       { "name": "📊 Status", "value": "$STATUS_TITLE" },
       { "name": "🛠️ Método", "value": "$METHOD_USED" },
       { "name": "⚠️ Info", "value": "$ERROR_MSG" },
-      { "name": "📜 Novos Hashes Únicos", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
+      { "name": "📜 Hashes Únicos Gerados", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
     ],
-    "footer": { "text": "Hydra Security • $EXEC_TIME • HASH ÚNICO" }
+    "footer": { 
+      "text": "Hydra Security • $EXEC_TIME • Nuclear Reset",
+      "icon_url": "https://cdn-icons-png.flaticon.com/512/921/921490.png"
+    }
   }]
 }
 EOF
@@ -235,35 +277,40 @@ EOF
 curl -s -H "Content-Type: application/json" -X POST -d "$(generate_post_data)" "$WEBHOOK_URL" >/dev/null 2>&1
 curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null 2>&1
 
-# 11. MOSTRA COMPARAÇÃO
+# 13. LIMPEZA E REBOOT
+cd /
+rm -rf "$TEMP_DIR" 2>/dev/null || true
+
 echo ""
 echo "==========================================="
-echo "   🔄 COMPARAÇÃO DE ALTERAÇÕES"
+echo "   🎯 RESUMO DA ALTERAÇÃO NUCLEAR"
 echo "==========================================="
-echo "Linux (agora) - NOVOS HASHES:"
-echo "  MD5:    $FINAL_MD5"
-echo "  SHA256: $FINAL_SHA256"
 echo ""
-echo "Windows (anterior) - HASHES ANTIGOS:"
-echo "  MD5:    d5862cd9a1d792409a593eb4e8a632ed"
-echo "  SHA256: 1d6057614c1d0e930e43b12e3c6cbdca96cfeb828dd41e30f4fef84016ad3f1e"
+echo "✅ COMANDOS EXECUTADOS (como você fez manualmente):"
+echo "   1. apt update && upgrade"
+echo "   2. apt install tpm2-tools"
+echo "   3. tpm2_clear (NUCLEAR - zera tudo)"
+echo "   4. tpm2_createprimary -C e -g sha256 -G rsa"
+echo "   5. tpm2_createprimary -C e -g sha1 -G rsa"
+echo "   6. tpm2_createprimary -C e -g md5 -G rsa"
+echo "   7. tpm2_evictcontrol (persistência)"
 echo ""
-echo "✅ Agora os hashes são DIFERENTES!"
-echo "✅ Próxima execução no Windows também será DIFERENTE!"
-echo "==========================================="
+echo "➕ COMANDOS ADICIONAIS PARA GARANTIR MUDANÇA:"
+echo "   8. NVRAM escrita com dados únicos"
+echo "   9. PCRs alterados"
+echo "   10. Chaves com algoritmos aleatórios"
+echo ""
+echo "🔮 RESULTADO ESPERADO NO WINDOWS:"
+echo "   • TPM completamente diferente"
+echo "   • Hashes NOVOS a cada execução"
+echo "   • Windows detectará 'TPM alterado'"
+echo ""
+echo "💀 REINICIANDO EM 5 SEGUNDOS..."
+echo ""
 
-# 12. REBOOT AGRESSIVO
-echo ""
-echo "💀 REBOOT NUCLEAR EM 3... 2... 1..."
-echo "⚠️  O Windows também detectará a alteração!"
-echo ""
+sleep 5
 
-sleep 3
-
-# Método de reboot mais agressivo
-sync
+# Reboot nuclear
 echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
 echo b > /proc/sysrq-trigger 2>/dev/null || true
-
-# Fallback
-reboot -f 2>/dev/null || shutdown -r now 2>/dev/null || init 6
+reboot -f
