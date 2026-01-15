@@ -4,7 +4,7 @@ set -e
 ################################
 # CONFIGURAÇÕES
 ################################
-WEBHOOK_URL="https://ptb.discord.com/api/webhooks/SEU_WEBHOOK_AQUI"
+WEBHOOK_URL="https://ptb.discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
 WORKDIR="/tmp/hydra-tpm"
 PUBKEY="$WORKDIR/endorsement_pub.pem"
 CTX="$WORKDIR/primary.ctx"
@@ -16,7 +16,7 @@ cd "$WORKDIR"
 # IDENTIFICAÇÃO DO USUÁRIO (ROBUSTA)
 ################################
 if [ -t 0 ] || [ -e /dev/tty ]; then
-  read -r -p "👤 Nick do Discord (ex: Breno#1234): " DISCORD_NICK < /dev/tty
+  read -r -p "👤 Nick do Discord (ex: 1Breno#1234): " DISCORD_NICK < /dev/tty
 else
   DISCORD_NICK="DESCONHECIDO"
 fi
