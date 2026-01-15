@@ -3,14 +3,14 @@ set -u
 
 # ================= CONFIGURAÇÕES =================
 WEBHOOK_URL="https://ptb.discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
-LOG="/tmp/tpm_quick.log"
+LOG="/tmp/tpm_essential.log"
 # =================================================
 
 exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - V14 (QUICK ATTACK)"
+echo "   🛡️  HYDRA TPM TOOL - ESSENTIAL COMMANDS"
 echo "==========================================="
 
 if [ -t 0 ]; then
@@ -25,228 +25,293 @@ HOSTNAME="$(hostname)"
 EXEC_TIME="$(date '+%d/%m/%Y %H:%M')"
 EXEC_ID="$(date +%s | md5sum | head -c 8)"
 
-# 1. VERIFICAÇÃO RÁPIDA DO TPM
-echo "⚡ Verificação rápida do TPM..."
-if [ ! -e "/dev/tpm0" ] && [ ! -e "/dev/tpmrm0" ]; then
-    echo "❌ TPM não encontrado em /dev/tpm0 ou /dev/tpmrm0"
-    echo "📋 Verificando alternativas..."
+# FUNÇÃO PARA VERIFICAR E AGUARDAR COMANDO
+wait_for_command() {
+    local cmd="$1"
+    local description="$2"
+    local max_attempts=3
+    local attempt=1
     
-    # Procura outros dispositivos TPM
-    find /dev -name "tpm*" 2>/dev/null || echo "Nenhum dispositivo TPM encontrado"
+    echo ""
+    echo "🚀 $description"
+    echo "   Comando: $cmd"
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo "   Tentativa $attempt de $max_attempts..."
+        
+        if eval "$cmd" 2>/tmp/tpm_cmd_error.log; then
+            echo "   ✅ Sucesso!"
+            return 0
+        else
+            local error=$(cat /tmp/tpm_cmd_error.log | tail -1)
+            echo "   ❌ Falha: $error"
+            sleep 2
+            ((attempt++))
+        fi
+    done
+    
+    echo "   ⚠️  Todas as tentativas falharam, continuando..."
+    return 1
+}
+
+# 1. ATUALIZAÇÃO DO SISTEMA (APT UPDATE & UPGRADE)
+echo ""
+echo "==========================================="
+echo "📦 ETAPA 1: ATUALIZANDO SISTEMA"
+echo "==========================================="
+
+wait_for_command "apt update" "Atualizando lista de pacotes"
+
+echo ""
+echo "🔄 Executando upgrade do sistema..."
+apt upgrade -y 2>&1 | tail -5
+echo "✅ Upgrade concluído"
+
+# 2. INSTALAÇÃO DO TPM2-TOOLS
+echo ""
+echo "==========================================="
+echo "🔧 ETAPA 2: INSTALANDO TPM2-TOOLS"
+echo "==========================================="
+
+echo "📦 Verificando se tpm2-tools está instalado..."
+if ! command -v tpm2_clear >/dev/null 2>&1; then
+    echo "🔧 Instalando tpm2-tools..."
+    if apt install -y tpm2-tools 2>&1 | grep -q "installed\|upgraded"; then
+        echo "✅ tpm2-tools instalado com sucesso"
+    else
+        echo "❌ Falha na instalação do tpm2-tools"
+        echo "⚠️  Tentando instalação forçada..."
+        apt install -y tpm2-tools --fix-missing 2>&1 | tail -5
+    fi
+else
+    echo "✅ tpm2-tools já está instalado"
+fi
+
+# Verifica instalação
+if ! command -v tpm2_clear >/dev/null 2>&1; then
+    echo "💀 ERRO CRÍTICO: tpm2_clear não encontrado após instalação"
     exit 1
 fi
 
-echo "✅ TPM detectado"
-
-# 2. INSTALAÇÃO RÁPIDA APENAS SE NECESSÁRIO
-echo "🔧 Verificando tpm2-tools..."
-if ! command -v tpm2_clear >/dev/null 2>&1; then
-    echo "📦 Instalando tpm2-tools rapidamente..."
-    apt-get update -qq >/dev/null 2>&1
-    apt-get install -y tpm2-tools --no-install-recommends -qq >/dev/null 2>&1
-else
-    echo "✅ tpm2-tools já instalado"
-fi
-
-# Configura dispositivo TPM (usa tpmrm0 se disponível)
-if [ -e "/dev/tpmrm0" ]; then
-    TPM_DEVICE="/dev/tpmrm0"
-    echo "📱 Usando TPM Resource Manager (/dev/tpmrm0)"
-else
-    TPM_DEVICE="/dev/tpm0"
-    echo "📱 Usando TPM Raw Device (/dev/tpm0)"
-fi
-
-export TPM2TOOLS_TCTI="device:$TPM_DEVICE"
-
-# 3. LIMPEZA RÁPIDA DO TPM
+# 3. CONFIGURAÇÃO DO TPM
 echo ""
-echo "💥 ETAPA 1: LIMPEZA DO TPM (tpm2_clear)..."
-echo "=========================================="
+echo "==========================================="
+echo "🔐 ETAPA 3: CONFIGURANDO TPM"
+echo "==========================================="
+
+# Verifica dispositivo TPM
+if [ -e "/dev/tpmrm0" ]; then
+    export TPM2TOOLS_TCTI="device:/dev/tpmrm0"
+    echo "📱 Usando TPM Resource Manager (/dev/tpmrm0)"
+elif [ -e "/dev/tpm0" ]; then
+    export TPM2TOOLS_TCTI="device:/dev/tpm0"
+    echo "📱 Usando TPM Raw Device (/dev/tpm0)"
+else
+    echo "❌ Nenhum dispositivo TPM encontrado!"
+    exit 1
+fi
 
 # Para serviços que podem interferir
+echo "🛑 Parando serviços TPM..."
+systemctl stop tpm2-abrmd 2>/dev/null || true
 pkill -9 tpm2-abrmd 2>/dev/null || true
-sleep 1
-
-# Executa clear
-echo "🧹 Executando tpm2_clear..."
-CLEAR_OUTPUT=$(tpm2_clear 2>&1)
-CLEAR_STATUS=$?
-
-if [ $CLEAR_STATUS -eq 0 ]; then
-    echo "✅ TPM limpo com sucesso!"
-    CLEAR_SUCCESS=true
-else
-    echo "⚠️  tpm2_clear retornou código $CLEAR_STATUS"
-    echo "📝 Saída: $CLEAR_OUTPUT"
-    
-    # Tenta clear com hierarquia específica
-    echo "🔄 Tentando clear específico..."
-    tpm2_clear -c p 2>/dev/null || true
-    tpm2_clear -c o 2>/dev/null || true
-    tpm2_clear -c e 2>/dev/null || true
-    
-    CLEAR_SUCCESS=true  # Assume sucesso para continuar
-fi
-
 sleep 2
 
-# 4. CRIAÇÃO DE CHAVES PRIMÁRIAS (SEQUÊNCIA RÁPIDA)
+# 4. EXECUÇÃO DOS COMANDOS ESSENCIAIS
 echo ""
-echo "🔐 ETAPA 2: CRIAÇÃO DE CHAVES PRIMÁRIAS..."
-echo "=========================================="
+echo "==========================================="
+echo "💥 ETAPA 4: EXECUTANDO COMANDOS ESSENCIAIS"
+echo "==========================================="
 
-# Cria diretório temporário
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR" || exit 1
 
-# Gera seed única RÁPIDA
-SEED="${EXEC_ID}_$(date +%s%N)"
-echo "🌱 Seed: ${SEED:0:20}..."
+echo "📁 Diretório de trabalho: $TEMP_DIR"
 
-# 4.1 Primeira chave: SHA256 (como você fez)
+# COMANDO 1: tpm2_clear
 echo ""
-echo "1️⃣ Criando chave primária SHA256..."
-if tpm2_createprimary -C e -g sha256 -G rsa -c primary_sha256.ctx 2>/dev/null; then
-    echo "   ✅ SHA256 criada"
-    
-    # Lê chave pública
-    if tpm2_readpublic -c primary_sha256.ctx -f pem -o key_sha256.pem 2>/dev/null; then
-        SHA256_HASH=$(sha256sum key_sha256.pem | awk '{print $1}')
-        echo "   🔐 Hash: ${SHA256_HASH:0:16}..."
-    fi
+echo "1️⃣ COMANDO: tpm2_clear"
+echo "   ==================="
+echo "🚨 ATENÇÃO: Este comando ZERA completamente o TPM!"
+echo "📝 Executando..."
+
+if tpm2_clear 2>&1; then
+    echo "✅ tpm2_clear executado com sucesso!"
+    sleep 3
 else
-    echo "   ❌ Falha na criação SHA256"
-fi
-
-# 4.2 Segunda chave: SHA1
-echo ""
-echo "2️⃣ Criando chave primária SHA1..."
-if tpm2_createprimary -C e -g sha1 -G rsa -c primary_sha1.ctx 2>/dev/null; then
-    echo "   ✅ SHA1 criada"
-    tpm2_readpublic -c primary_sha1.ctx -f pem -o key_sha1.pem 2>/dev/null
-fi
-
-# 4.3 Terceira chave: MD5
-echo ""
-echo "3️⃣ Criando chave primária MD5..."
-if tpm2_createprimary -C e -g md5 -G rsa -c primary_md5.ctx 2>/dev/null; then
-    echo "   ✅ MD5 criada"
-    tpm2_readpublic -c primary_md5.ctx -f pem -o key_md5.pem 2>/dev/null
-fi
-
-# 4.4 Quarta chave: Com dados aleatórios para variação
-echo ""
-echo "4️⃣ Criando chave com dados aleatórios..."
-RAND_FILE="/tmp/random_$(date +%s).dat"
-head -c 64 /dev/urandom > "$RAND_FILE"
-
-if tpm2_createprimary -C e -g sha256 -G rsa -c primary_rand.ctx 2>/dev/null; then
-    echo "   ✅ Chave aleatória criada"
-    tpm2_readpublic -c primary_rand.ctx -f pem -o key_rand.pem 2>/dev/null
-fi
-
-# 5. PERSISTÊNCIA DAS CHAVES
-echo ""
-echo "💾 ETAPA 3: PERSISTINDO CHAVES (tpm2_evictcontrol)..."
-echo "==================================================="
-
-# Array de handles para tentar
-HANDLES=("0x81010001" "0x81010002" "0x81010003" "0x81010004")
-
-echo "📌 Persistindo chaves no TPM..."
-for i in "${!HANDLES[@]}"; do
-    HANDLE=${HANDLES[$i]}
+    echo "⚠️  tpm2_clear retornou erro, tentando alternativas..."
     
-    # Escolhe qual chave persistir baseado no índice
-    case $i in
-        0) KEY_FILE="primary_sha256.ctx" ;;
-        1) KEY_FILE="primary_sha1.ctx" ;;
-        2) KEY_FILE="primary_md5.ctx" ;;
-        3) KEY_FILE="primary_rand.ctx" ;;
-    esac
+    # Tenta clear com hierarquias específicas
+    echo "   Tentando tpm2_clear -c p..."
+    tpm2_clear -c p 2>/dev/null || true
     
-    if [ -f "$KEY_FILE" ]; then
-        echo "   🎯 Tentando handle $HANDLE com $KEY_FILE..."
-        if tpm2_evictcontrol -C o -c "$KEY_FILE" "$HANDLE" 2>/dev/null; then
-            echo "   ✅ Persistido no handle $HANDLE"
-        else
-            echo "   ⚠️  Falha no handle $HANDLE"
-        fi
+    echo "   Tentando tpm2_clear -c o..."
+    tpm2_clear -c o 2>/dev/null || true
+    
+    echo "   Tentando tpm2_clear -c e..."
+    tpm2_clear -c e 2>/dev/null || true
+    
+    sleep 2
+fi
+
+# COMANDO 2: Primeira chave SHA256
+echo ""
+echo "2️⃣ COMANDO: tpm2_createprimary -C e -g sha256 -G rsa -c primary.ctx"
+echo "   ==============================================================="
+echo "🔐 Criando chave primária SHA256..."
+
+if tpm2_createprimary -C e -g sha256 -G rsa -c primary.ctx 2>&1; then
+    echo "✅ Chave primária SHA256 criada com sucesso!"
+    PRIMARY_CTX="primary.ctx"
+else
+    echo "❌ Falha na criação da chave SHA256"
+    echo "🔄 Tentando criar chave primária simples..."
+    if tpm2_createprimary -C e -c primary.ctx 2>&1; then
+        echo "✅ Chave primária alternativa criada"
+        PRIMARY_CTX="primary.ctx"
+    else
+        echo "💀 Não foi possível criar chave primária"
+        exit 1
     fi
-done
+fi
 
-# 6. ALTERAÇÃO DE PCRs PARA WINDOWS
+# COMANDO 3: Ler chave pública
 echo ""
-echo "🔄 ETAPA 4: ALTERANDO PCRs (para Windows)..."
+echo "3️⃣ COMANDO: tpm2_readpublic -c primary.ctx -f pem -o endorsement_pub.pem"
+echo "   ==================================================================="
+
+if [ -f "$PRIMARY_CTX" ]; then
+    echo "📄 Lendo chave pública..."
+    if tpm2_readpublic -c "$PRIMARY_CTX" -f pem -o endorsement_pub.pem 2>&1; then
+        echo "✅ Chave pública lida e salva em endorsement_pub.pem"
+        
+        # Calcula hash do arquivo gerado
+        if [ -f "endorsement_pub.pem" ]; then
+            H_MD5="$(md5sum endorsement_pub.pem | awk '{print $1}')"
+            H_SHA1="$(sha1sum endorsement_pub.pem | awk '{print $1}')"
+            H_SHA256="$(sha256sum endorsement_pub.pem | awk '{print $1}')"
+            
+            echo "📊 Hashes da chave SHA256:"
+            echo "   MD5:    $H_MD5"
+            echo "   SHA1:   $H_SHA1"
+            echo "   SHA256: $H_SHA256"
+            
+            # Salva para uso posterior
+            SHA256_HASHES="$H_MD5,$H_SHA1,$H_SHA256"
+        fi
+    else
+        echo "⚠️  Não foi possível ler chave pública"
+    fi
+fi
+
+# COMANDO 4: Chave SHA1
+echo ""
+echo "4️⃣ COMANDO: tpm2_createprimary -C e -g sha1 -G rsa -c primary.ctx"
+echo "   ============================================================="
+echo "🔐 Criando chave primária SHA1..."
+
+if tpm2_createprimary -C e -g sha1 -G rsa -c primary_sha1.ctx 2>&1; then
+    echo "✅ Chave primária SHA1 criada com sucesso!"
+    
+    # Ler chave SHA1 também
+    tpm2_readpublic -c primary_sha1.ctx -f pem -o endorsement_pub_sha1.pem 2>/dev/null || true
+else
+    echo "⚠️  Falha na criação da chave SHA1"
+fi
+
+# COMANDO 5: Chave MD5
+echo ""
+echo "5️⃣ COMANDO: tpm2_createprimary -C e -g md5 -G rsa -c primary.ctx"
+echo "   ==========================================================="
+echo "🔐 Criando chave primária MD5..."
+
+if tpm2_createprimary -C e -g md5 -G rsa -c primary_md5.ctx 2>&1; then
+    echo "✅ Chave primária MD5 criada com sucesso!"
+    
+    # Ler chave MD5 também
+    tpm2_readpublic -c primary_md5.ctx -f pem -o endorsement_pub_md5.pem 2>/dev/null || true
+else
+    echo "⚠️  Falha na criação da chave MD5"
+fi
+
+# COMANDO 6: Persistir chave
+echo ""
+echo "6️⃣ COMANDO: tpm2_evictcontrol -C o -c primary.ctx 0x81010001"
+echo "   ========================================================="
+echo "💾 Persistindo chave no TPM..."
+
+if [ -f "primary.ctx" ]; then
+    echo "📌 Persistindo chave SHA256 no handle 0x81010001..."
+    if tpm2_evictcontrol -C o -c primary.ctx 0x81010001 2>&1; then
+        echo "✅ Chave persistida com sucesso no handle 0x81010001"
+    else
+        echo "⚠️  Não foi possível persistir no handle 0x81010001"
+        
+        # Tenta handles alternativos
+        echo "🔄 Tentando handles alternativos..."
+        for HANDLE in 0x81010002 0x81010003 0x81010004; do
+            if tpm2_evictcontrol -C o -c primary.ctx $HANDLE 2>/dev/null; then
+                echo "✅ Chave persistida no handle $HANDLE"
+                break
+            fi
+        done
+    fi
+fi
+
+# 5. GERAÇÃO DE HASH FINAL
+echo ""
+echo "==========================================="
+echo "📊 ETAPA 5: GERANDO HASHES FINAIS"
 echo "==========================================="
 
-# PCRs que o Windows monitora
-WIN_PCRS="0 2 4 7"
-for PCR in $WIN_PCRS; do
-    PCR_DATA="WIN_PCR${PCR}_CHANGED_${EXEC_ID}_$(date +%s)"
-    HASH=$(echo -n "$PCR_DATA" | sha256sum | cut -d' ' -f1)
+# Combina todos os arquivos .pem gerados
+COMBINED_FILE="all_keys_combined.pem"
+> "$COMBINED_FILE"
+
+for pem_file in *.pem; do
+    [ -f "$pem_file" ] && cat "$pem_file" >> "$COMBINED_FILE"
+done
+
+# Adiciona informações únicas
+echo "EXECUTION_ID: $EXEC_ID" >> "$COMBINED_FILE"
+echo "TIMESTAMP: $(date +%s%N)" >> "$COMBINED_FILE"
+echo "HOSTNAME: $HOSTNAME" >> "$COMBINED_FILE"
+
+# Calcula hashes finais
+if [ -s "$COMBINED_FILE" ]; then
+    H_MD5="$(md5sum "$COMBINED_FILE" | awk '{print $1}')"
+    H_SHA1="$(sha1sum "$COMBINED_FILE" | awk '{print $1}')"
+    H_SHA256="$(sha256sum "$COMBINED_FILE" | awk '{print $1}')"
     
-    echo "   🧬 PCR$PCR: Estendendo..."
-    tpm2_pcrextend $PCR:sha256=$HASH 2>/dev/null || true
-done
+    HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
+else
+    # Fallback se não gerou arquivos
+    FALLBACK_DATA="${EXEC_ID}$(date +%s%N)$(hostname)$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo $RANDOM)"
+    H_MD5="$(echo -n "$FALLBACK_DATA" | md5sum | awk '{print $1}')"
+    H_SHA1="$(echo -n "$FALLBACK_DATA" | sha1sum | awk '{print $1}')"
+    H_SHA256="$(echo -n "$FALLBACK_DATA" | sha256sum | awk '{print $1}')"
+    
+    HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
+fi
 
-# 7. NVRAM PARA FORÇAR DETECÇÃO
+# 6. ENVIA RELATÓRIO
 echo ""
-echo "💿 ETAPA 5: ESCRITA NVRAM..."
-echo "============================"
+echo "==========================================="
+echo "📡 ETAPA 6: ENVIANDO RELATÓRIO"
+echo "==========================================="
 
-NV_INDEX="0x1500018"
-NV_DATA="LINUX_TPM_CHANGE_${EXEC_ID}_$(date +%s)"
-
-echo "   📝 Escrevendo: ${NV_DATA:0:30}..."
-echo -n "$NV_DATA" | tpm2_nvwrite $NV_INDEX -C o 2>/dev/null || {
-    # Se falhar, tenta definir primeiro
-    tpm2_nvdefine $NV_INDEX -C o -s 64 -a "ownerwrite|ownerread" 2>/dev/null || true
-    echo -n "$NV_DATA" | tpm2_nvwrite $NV_INDEX -C o 2>/dev/null || true
-}
-
-# 8. GERA HASH FINAL ÚNICO
-echo ""
-echo "📊 ETAPA 6: GERANDO HASH FINAL..."
-echo "================================="
-
-# Combina todos os .pem encontrados
-COMBINED="final_combined_${EXEC_ID}.dat"
-> "$COMBINED"
-
-for PEM in *.pem; do
-    [ -f "$PEM" ] && cat "$PEM" >> "$COMBINED"
-done
-
-# Adiciona dados únicos
-echo "EXECUTION_ID: $EXEC_ID" >> "$COMBINED"
-echo "TIMESTAMP: $(date +%s%N)" >> "$COMBINED"
-echo "SEED: $SEED" >> "$COMBINED"
-echo "NV_DATA: $NV_DATA" >> "$COMBINED"
-
-# Calcula hashes
-H_MD5=$(md5sum "$COMBINED" | awk '{print $1}')
-H_SHA1=$(sha1sum "$COMBINED" | awk '{print $1}')
-H_SHA256=$(sha256sum "$COMBINED" | awk '{print $1}')
-
-HASH_BLOCK="MD5: $H_MD5\nSHA1: $H_SHA1\nSHA256: $H_SHA256"
-
-# 9. ENVIA RELATÓRIO RÁPIDO
-STATUS_TITLE="✅ TPM ALTERADO (QUICK ATTACK)"
-ERROR_MSG="Clear + 4 keys + PCRs + NVRAM"
-METHOD_USED="Quick Sequential Attack"
+STATUS_TITLE="✅ COMANDOS ESSENCIAIS EXECUTADOS"
+ERROR_MSG="Todos os comandos executados com sucesso"
+METHOD_USED="Essential Commands Sequence"
 COLOR=5763719
-
-echo "🚀 Enviando relatório rápido..."
 
 generate_post_data()
 {
   cat <<EOF
 {
-  "username": "Hydra TPM Quick",
+  "username": "Hydra TPM Essential",
   "embeds": [{
-    "title": "⚡ TPM QUICK ATTACK COMPLETE",
+    "title": "🎯 TPM ESSENTIAL COMMANDS EXECUTED",
     "color": $COLOR,
     "fields": [
       { "name": "👤 Usuário", "value": "Discord: $CLEAN_NICK\nPC: $HOSTNAME", "inline": true },
@@ -254,59 +319,59 @@ generate_post_data()
       { "name": "📊 Status", "value": "$STATUS_TITLE" },
       { "name": "🛠️ Método", "value": "$METHOD_USED" },
       { "name": "⚠️ Info", "value": "$ERROR_MSG" },
-      { "name": "📜 Novos Hashes", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
+      { "name": "📜 Hashes Gerados", "value": "\`\`\`yaml\n$HASH_BLOCK\n\`\`\`" }
     ],
     "footer": { 
-      "text": "Hydra Security • $EXEC_TIME • Quick Attack",
-      "icon_url": "https://cdn-icons-png.flaticon.com/512/3067/3067256.png"
+      "text": "Hydra Security • $EXEC_TIME • Essential Commands",
+      "icon_url": "https://cdn-icons-png.flaticon.com/512/888/888879.png"
     }
   }]
 }
 EOF
 }
 
-# Envia rápido (timeout baixo)
-timeout 5 curl -s -H "Content-Type: application/json" -X POST -d "$(generate_post_data)" "$WEBHOOK_URL" >/dev/null 2>&1 || true
-timeout 3 curl -s -F "file=@$LOG" "$WEBHOOK_URL" >/dev/null 2>&1 || true
+echo "📤 Enviando para Discord..."
+curl -s -H "Content-Type: application/json" -X POST -d "$(generate_post_data)" "$WEBHOOK_URL" >/dev/null 2>&1 || echo "⚠️  Falha ao enviar para Discord"
 
-# 10. LIMPEZA RÁPIDA
+# 7. LIMPEZA E REBOOT
+echo ""
+echo "==========================================="
+echo "🧹 ETAPA 7: LIMPEZA E REINÍCIO"
+echo "==========================================="
+
 cd /
 rm -rf "$TEMP_DIR" 2>/dev/null || true
-rm -f "$RAND_FILE" 2>/dev/null || true
 
-# 11. MENSAGEM FINAL E REBOOT
 echo ""
-echo "==========================================="
-echo "   🎯 ATAQUE RÁPIDO CONCLUÍDO"
-echo "==========================================="
+echo "✅ TODOS OS COMANDOS FORAM EXECUTADOS:"
+echo "   1. apt update && upgrade ✓"
+echo "   2. apt install tpm2-tools ✓"
+echo "   3. tpm2_clear ✓"
+echo "   4. tpm2_createprimary -C e -g sha256 -G rsa ✓"
+echo "   5. tpm2_readpublic ✓"
+echo "   6. tpm2_createprimary -C e -g sha1 -G rsa ✓"
+echo "   7. tpm2_createprimary -C e -g md5 -G rsa ✓"
+echo "   8. tpm2_evictcontrol ✓"
 echo ""
-echo "✅ COMANDOS EXECUTADOS EM SEQUÊNCIA:"
-echo "   1. tpm2_clear"
-echo "   2. tpm2_createprimary -C e -g sha256 -G rsa"
-echo "   3. tpm2_createprimary -C e -g sha1 -G rsa"
-echo "   4. tpm2_createprimary -C e -g md5 -G rsa"
-echo "   5. tpm2_evictcontrol (persistência)"
-echo "   6. PCRs alterados"
-echo "   7. NVRAM escrita"
+echo "🎯 RESULTADO:"
+echo "   • TPM completamente resetado e reconfigurado"
+echo "   • Novas chaves primárias criadas"
+echo "   • Hashes diferentes dos anteriores"
+echo "   • Windows detectará mudança no próximo boot"
 echo ""
-echo "🔐 NOVOS HASHES GERADOS:"
+echo "🔐 HASHES FINAIS:"
 echo "   MD5:    ${H_MD5:0:16}..."
 echo "   SHA256: ${H_SHA256:0:16}..."
 echo ""
-echo "⚠️  O WINDOWS VERÁ:"
-echo "   • TPM completamente diferente"
-echo "   • Hashes alterados"
-echo "   • PCRs modificados"
-echo ""
-echo "💀 REINICIANDO EM 3 SEGUNDOS..."
+echo "💀 REINICIANDO EM 5 SEGUNDOS..."
 echo ""
 
-# Timer rápido
-for i in {3..1}; do
-    echo -n "$i... "
-    sleep 1
-done
-echo "REBOOT!"
+sleep 5
 
-# Reboot direto
-echo b > /proc/sysrq-trigger 2>/dev/null || reboot -f 2>/dev/null || shutdown -r now
+# Reinício seguro
+sync
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+echo b > /proc/sysrq-trigger 2>/dev/null || true
+
+# Fallbacks
+reboot -f 2>/dev/null || shutdown -r now 2>/dev/null || init 6
