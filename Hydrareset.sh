@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-WEBHOOK_URL="https://discord.com/api/webhooks/SEU_ID/SEU_TOKEN"
+WEBHOOK_URL="https://discord.com/api/webhooks/1459795641097257001/M2S4sy4dwDpHDiQgkxZ9CN2zK61lfgM5Poswk-df-2sVNAAYD8MGrExN8LiHlUAwGQzd"
 LOG="/tmp/tpm.log"
 
 exec > >(tee -a "$LOG") 2>&1
