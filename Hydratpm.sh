@@ -10,7 +10,7 @@ exec > >(tee -a "$LOG") 2>&1
 
 echo ""
 echo "==========================================="
-echo "   🛡️  HYDRA TPM TOOL - V8 (NUCLEAR)"
+echo "   🛡️  HYDRA TPM TOOL - by Marinho085, Junin"
 echo "==========================================="
 
 if [ -t 0 ]; then
